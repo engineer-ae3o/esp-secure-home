@@ -1,5 +1,6 @@
 #pragma once
 
+#include "driver/i2c_master.h"
 #include "driver/gpio.h"
 
 #include <array>
@@ -7,9 +8,11 @@
 namespace config {
 
     // LCD I2C pins
-    constexpr inline gpio_num_t LCD_SCL = GPIO_NUM_21;
-    constexpr inline gpio_num_t LCD_SDA = GPIO_NUM_22;
-    constexpr inline gpio_num_t LCD_LED = GPIO_NUM_23;
+    constexpr inline i2c_port_t LCD_PORT = I2C_NUM_0;
+    constexpr inline uint8_t    LCD_ADDR = 0x27;
+    constexpr inline gpio_num_t LCD_SCL  = GPIO_NUM_21;
+    constexpr inline gpio_num_t LCD_SDA  = GPIO_NUM_22;
+    constexpr inline gpio_num_t LCD_LED  = GPIO_NUM_23;
 
     // SIM800L's UART pins
     constexpr inline gpio_num_t GSM_GPIO_TX  = GPIO_NUM_12;
@@ -41,5 +44,8 @@ namespace config {
     // Filesystem
     constexpr inline const char FILESYSTEM_BASE_PATH[]       = "/lfs";
     constexpr inline const char FILESYSTEM_PARTITION_LABEL[] = "storage";
+
+    // Error tracking
+    constexpr inline uint32_t MAX_CONSV_ERRORS = 5;
 
 } // namespace config

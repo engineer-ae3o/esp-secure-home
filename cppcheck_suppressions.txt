@@ -1,5 +1,6 @@
 constParameterCallback
 useInitializationList
+constParameterPointer
 uninitMemberVarNoCtor
 missingIncludeSystem
 unmatchedSuppression
@@ -7,5 +8,6 @@ constVariablePointer
 dangerousTypeCast
 unusedFunction
 missingInclude
+variableScope
 syntaxError
 cstyleCast

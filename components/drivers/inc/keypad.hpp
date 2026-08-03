@@ -51,7 +51,7 @@ namespace pad {
          * 
          * @return ESP_OK on success, error code otherwise.
          */
-        esp_err_t init(const config_t& config) {
+        [[nodiscard]] esp_err_t init(const config_t& config) {
             if (m_is_initialized) {
                 return ESP_ERR_INVALID_STATE;
             }
@@ -118,7 +118,7 @@ namespace pad {
          * 
          * @return ESP_OK on success, error code otherwise.
          */
-        esp_err_t deinit() {
+        [[nodiscard]] esp_err_t deinit() {
             if (!m_is_initialized) {
                 return ESP_ERR_INVALID_STATE;
             }
