@@ -14,21 +14,11 @@
 #include <numeric>
 #include <utility>
 #include <expected>
-#include <algorithm>
 
 namespace pad {
 
-    constexpr inline uint32_t DEBOUNCE_MS = 50;
-
     constexpr inline uint32_t ROWS    = 4;
     constexpr inline uint32_t COLUMNS = 4;
-
-    constexpr inline std::array<std::array<char, COLUMNS>, ROWS> KEYS = {{
-        {'1', '2', '3', 'A'},
-        {'4', '5', '6', 'B'},
-        {'7', '8', '9', 'C'},
-        {'*', '0', '#', 'D'},
-    }};
 
     struct config_t {
         std::array<gpio_num_t, ROWS>    row_pins{};
@@ -37,18 +27,6 @@ namespace pad {
 
     template<bool init_isr_service = true, int isr_flags = ESP_INTR_FLAG_LEVEL1, uint32_t queue_length = ROWS * COLUMNS>
     class keypad_t {
-    private:
-        bool     m_is_initialized{};
-        config_t m_config{};
-
-        TimerHandle_t m_debounce_timer{};
-        StaticTimer_t m_deb_timer_tcb{};
-
-        QueueHandle_t m_event_queue{};
-        StaticQueue_t m_queue_tcb{};
-
-        std::array<uint8_t, (queue_length * sizeof(KEYS[0][0]))> m_queue_buffer{};
-
     public:
         keypad_t() = default;
 
@@ -82,7 +60,12 @@ namespace pad {
 
             // Set all columns as input pullups with interrupt on falling edge
             const gpio_config_t col_pins_config = {
-                .pin_bit_mask = 1ULL << (std::accumulate(m_config.col_pins.begin(), m_config.col_pins.end(), 0)),
+                .pin_bit_mask = std::accumulate(m_config.col_pins.begin(),
+                                                m_config.col_pins.end(),
+                                                0ULL,
+                                                [](uint64_t acc, gpio_num_t pin) {
+                                                    return acc | (1ULL << std::to_underlying(pin));
+                                                }),
                 .mode         = GPIO_MODE_INPUT,
                 .pull_up_en   = GPIO_PULLUP_ENABLE,
                 .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -102,7 +85,12 @@ namespace pad {
 
             // Set all rows as output push pull
             const gpio_config_t row_pins_config = {
-                .pin_bit_mask = 1ULL << (std::accumulate(m_config.row_pins.begin(), m_config.row_pins.end(), 0)),
+                .pin_bit_mask = std::accumulate(m_config.row_pins.begin(),
+                                                m_config.row_pins.end(),
+                                                0ULL,
+                                                [](uint64_t acc, gpio_num_t pin) {
+                                                    return acc | (1ULL << std::to_underlying(pin));
+                                                }),
                 .mode         = GPIO_MODE_OUTPUT,
                 .pull_up_en   = GPIO_PULLUP_DISABLE,
                 .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -116,6 +104,7 @@ namespace pad {
                 gpio_set_level(row_pin, 0);
             }
 
+            // Create the debounce timer and event queue
             // Can't fail since stack allocated
             m_event_queue    = xQueueCreateStatic(queue_length, sizeof(KEYS[0][0]), m_queue_buffer.data(), &m_queue_tcb);
             m_debounce_timer = xTimerCreateStatic("Deb timer", pdMS_TO_TICKS(DEBOUNCE_MS), pdFALSE, this, deb_timer_cb, &m_deb_timer_tcb);
@@ -152,6 +141,26 @@ namespace pad {
         };
 
     private:
+        bool     m_is_initialized{};
+        config_t m_config{};
+
+        constexpr static uint32_t DEBOUNCE_MS = 50;
+
+        constexpr static std::array<std::array<char, COLUMNS>, ROWS> KEYS = {{
+            {'1', '2', '3', 'A'},
+            {'4', '5', '6', 'B'},
+            {'7', '8', '9', 'C'},
+            {'*', '0', '#', 'D'},
+        }};
+
+        QueueHandle_t m_event_queue{};
+        StaticQueue_t m_queue_tcb{};
+
+        std::array<uint8_t, (queue_length * sizeof(KEYS[0][0]))> m_queue_buffer{};
+
+        TimerHandle_t m_debounce_timer{};
+        StaticTimer_t m_deb_timer_tcb{};
+
         void cleanup() {
             // Deinitialize all used gpio pins
             for (const auto& col_pin : m_config.col_pins) {
@@ -200,19 +209,10 @@ namespace pad {
             // Start the debounce timer
             BaseType_t higher_priority_task_woken = pdFALSE;
             xTimerStartFromISR(driver.m_debounce_timer, &higher_priority_task_woken);
-
-            // Yield if the timer was woken up, but reenable the interrupts if it wasn't
-            if (higher_priority_task_woken) {
-                portYIELD_FROM_ISR();
-            } else {
-                for (const auto& col_pin : driver.m_config.col_pins) {
-                    gpio_intr_enable(col_pin);
-                }
-            }
+            portYIELD_FROM_ISR(higher_priority_task_woken);
         }
 
         static void deb_timer_cb(TimerHandle_t xTimer) {
-            // Get timer ID
             const auto& keypad = *static_cast<keypad_t<init_isr_service, isr_flags, queue_length>*>(pvTimerGetTimerID(xTimer));
 
             // Set all row pins high
@@ -241,12 +241,15 @@ namespace pad {
                             return;
                         }
                     }
+
+                    // Since this wasn't the right row, set it back to its high state
+                    gpio_set_level(keypad.m_config.row_pins[r], 1);
                 }
             }();
 
             // Send only first detected keypad press to the event queue
             if (found) {
-                xQueueSend(keypad->m_event_queue, &KEYS[row][column], 0);
+                xQueueSend(keypad.m_event_queue, &KEYS[row][column], 0);
             }
 
             // Take all row pins back to their default low state

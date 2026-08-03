@@ -1,6 +1,7 @@
 #pragma once
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/timers.h"
 #include "freertos/task.h"
 
 #include "utils.hpp"
@@ -13,13 +14,13 @@
 namespace nc {
 
     enum class type_t : uint8_t {
-        REED  = 0,
-        LIMIT = 1,
+        REED  = 1U << 0,
+        LIMIT = 1U << 1,
     };
 
     struct config_t {
         gpio_num_t   pin{GPIO_NUM_NC};
-        TaskHandle_t calling_task_handle{};
+        TaskHandle_t recv_task_handle{};
     };
 
     template<type_t type, bool init_isr_service = false, int isr_flags = ESP_INTR_FLAG_LEVEL1>
@@ -55,6 +56,9 @@ namespace nc {
             // Add the ISR for the IRQ pin
             TRY_WITH_FUNC(gpio_isr_handler_add(m_config.pin, irq_handler, this), cleanup());
 
+            // Create the debounce timer
+            m_debounce_timer = xTimerCreateStatic("Deb timer", pdMS_TO_TICKS(DEBOUNCE_MS), pdFALSE, this, deb_timer_cb, &m_deb_timer_tcb);
+
             m_is_initialized = true;
             return ESP_OK;
         }
@@ -77,6 +81,11 @@ namespace nc {
         bool     m_is_initialized{};
         config_t m_config{};
 
+        TimerHandle_t m_debounce_timer{};
+        StaticTimer_t m_deb_timer_tcb{};
+
+        constexpr static uint32_t DEBOUNCE_MS = 50;
+
         void cleanup() {
             gpio_intr_disable(m_config.pin);
             gpio_isr_handler_remove(m_config.pin);
@@ -86,16 +95,44 @@ namespace nc {
                 gpio_uninstall_isr_service();
             }
 
+            if (m_debounce_timer) {
+                xTimerStop(m_debounce_timer, portMAX_DELAY);
+                xTimerDelete(m_debounce_timer, portMAX_DELAY);
+                m_deb_timer_tcb  = {};
+                m_debounce_timer = nullptr;
+            }
+
             m_config         = {};
             m_is_initialized = false;
         }
 
         static void irq_handler(void* arg) {
             const auto& driver = *static_cast<switch_t<type, init_isr_service, isr_flags>*>(arg);
-            // Send notification to the calling task
-            BaseType_t higher_priority_task_woken{};
-            xTaskNotifyFromISR(driver->m_config.calling_task_handle, std::to_underlying(type), eSetBits, &higher_priority_task_woken);
+
+            // Disable the interrupts for the debounce period
+            gpio_intr_disable(driver.m_config.pin);
+
+            // Start the debounce timer
+            BaseType_t higher_priority_task_woken = pdFALSE;
+            xTimerStartFromISR(driver.m_debounce_timer, &higher_priority_task_woken);
             portYIELD_FROM_ISR(higher_priority_task_woken);
+        }
+
+        static void deb_timer_cb(TimerHandle_t xTimer) {
+            const auto& driver = *static_cast<switch_t<type, init_isr_service, isr_flags>*>(pvTimerGetTimerID(xTimer));
+
+            // Check the pin state. Should still be high for a true switch break. So
+            // return if the state is low, since that would indicate a false positive.
+            if (gpio_get_level(driver.m_config.pin) == 0) {
+                gpio_intr_enable(driver.m_config.pin);
+                return;
+            }
+
+            // Send the notification to the receiving task
+            xTaskNotify(driver.m_config.recv_task_handle, std::to_underlying(type), eSetBits);
+
+            // Re-enable the interrupt on the pin
+            gpio_intr_enable(driver.m_config.pin);
         }
     };
 
