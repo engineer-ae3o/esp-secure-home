@@ -11,11 +11,14 @@
 #include "esp_err.h"
 
 #include <array>
+#include <numeric>
+#include <utility>
 #include <expected>
+#include <algorithm>
 
 namespace pad {
 
-    constexpr inline uint32_t DEBOUNCE_TIME_MS = 50;
+    constexpr inline uint32_t DEBOUNCE_MS = 50;
 
     constexpr inline uint32_t ROWS    = 4;
     constexpr inline uint32_t COLUMNS = 4;
@@ -39,10 +42,10 @@ namespace pad {
         config_t m_config{};
 
         TimerHandle_t m_debounce_timer{};
-        StaticTimer_t m_debounce_timer_structure{};
+        StaticTimer_t m_deb_timer_tcb{};
 
         QueueHandle_t m_event_queue{};
-        StaticQueue_t m_queue_structure{};
+        StaticQueue_t m_queue_tcb{};
 
         std::array<uint8_t, (queue_length * sizeof(KEYS[0][0]))> m_queue_buffer{};
 
@@ -77,39 +80,47 @@ namespace pad {
 
             m_config = config;
 
-            // Do this now to avoid recomputing the OR'ed mask multiple times
-            m_col_pins = (m_config.col_pins[0] | m_config.col_pins[1] | m_config.col_pins[2] | m_config.col_pins[3]);
-            m_row_pins = (m_config.row_pins[0] | m_config.row_pins[1] | m_config.row_pins[2] | m_config.row_pins[3]);
-
             // Set all columns as input pullups with interrupt on falling edge
-            GPIO_InitTypeDef col_init = {
-                .Pin   = m_col_pins,
-                .Mode  = GPIO_MODE_IT_FALLING,
-                .Pull  = GPIO_PULLUP,
-                .Speed = GPIO_SPEED_FREQ_LOW,
+            const gpio_config_t col_pins_config = {
+                .pin_bit_mask = 1ULL << (std::accumulate(m_config.col_pins.begin(), m_config.col_pins.end(), 0)),
+                .mode         = GPIO_MODE_INPUT,
+                .pull_up_en   = GPIO_PULLUP_ENABLE,
+                .pull_down_en = GPIO_PULLDOWN_DISABLE,
+                .intr_type    = GPIO_INTR_NEGEDGE,
             };
-            HAL_GPIO_Init(m_config.col_port, &col_init);
+            TRY(gpio_config(&col_pins_config));
+
+            if constexpr (init_isr_service) {
+                TRY_WITH_FUNC(gpio_install_isr_service(isr_flags), cleanup());
+            }
+
+            // Add the ISR for the column pins. The same ISR is used for all the column pins
+            for (const auto& col_pin : m_config.col_pins) {
+                TRY_WITH_FUNC(gpio_isr_handler_add(col_pin, irq_handler, this), cleanup());
+                TRY_WITH_FUNC(gpio_intr_enable(col_pin), cleanup());
+            }
 
             // Set all rows as output push pull
-            GPIO_InitTypeDef row_init = {
-                .Pin   = m_row_pins,
-                .Mode  = GPIO_MODE_OUTPUT_PP,
-                .Pull  = GPIO_NOPULL,
-                .Speed = GPIO_SPEED_FREQ_LOW,
+            const gpio_config_t row_pins_config = {
+                .pin_bit_mask = 1ULL << (std::accumulate(m_config.row_pins.begin(), m_config.row_pins.end(), 0)),
+                .mode         = GPIO_MODE_OUTPUT,
+                .pull_up_en   = GPIO_PULLUP_DISABLE,
+                .pull_down_en = GPIO_PULLDOWN_DISABLE,
+                .intr_type    = GPIO_INTR_DISABLE,
             };
-            HAL_GPIO_Init(m_config.row_port, &row_init);
+            TRY_WITH_FUNC(gpio_config(&row_pins_config), cleanup());
 
-            // Set all row pins low by default so any press triggers
-            // the falling edge irq on the pressed column key immediately
-            HAL_GPIO_WritePin(m_config.row_port, m_row_pins, GPIO_PIN_RESET);
+            // Set all row pins low so any key press triggers the falling
+            // edge interrupt on the pressed column key immediately
+            for (const auto& row_pin : m_config.row_pins) {
+                gpio_set_level(row_pin, 0);
+            }
 
             // Can't fail since stack allocated
-            m_event_queue    = xQueueCreateStatic(queue_length, sizeof(KEYS[0][0]), m_queue_buffer.data(), &m_queue_structure);
-            m_debounce_timer = xTimerCreateStatic(
-                "Debounce_timer", pdMS_TO_TICKS(DEBOUNCE_TIME_MS), pdFALSE, this, debounce_timer_cb, &m_debounce_timer_structure);
+            m_event_queue    = xQueueCreateStatic(queue_length, sizeof(KEYS[0][0]), m_queue_buffer.data(), &m_queue_tcb);
+            m_debounce_timer = xTimerCreateStatic("Deb timer", pdMS_TO_TICKS(DEBOUNCE_MS), pdFALSE, this, deb_timer_cb, &m_deb_timer_tcb);
 
             m_is_initialized = true;
-
             return ESP_OK;
         }
 
@@ -159,30 +170,29 @@ namespace pad {
                 gpio_uninstall_isr_service();
             }
 
-            m_config = {};
-
             if (m_event_queue) {
                 vQueueDelete(m_event_queue);
                 m_queue_buffer.fill('\0');
-                m_queue_structure = {};
-                m_event_queue     = nullptr;
+                m_queue_tcb   = {};
+                m_event_queue = nullptr;
             }
 
             if (m_debounce_timer) {
                 xTimerStop(m_debounce_timer, portMAX_DELAY);
                 xTimerDelete(m_debounce_timer, portMAX_DELAY);
-                m_debounce_timer_structure = {};
-                m_debounce_timer           = nullptr;
+                m_deb_timer_tcb  = {};
+                m_debounce_timer = nullptr;
             }
 
+            m_config         = {};
             m_is_initialized = false;
         }
 
         static void irq_handler(void* arg) {
             const auto& driver = *static_cast<keypad_t<init_isr_service, isr_flags, queue_length>*>(arg);
 
-            // Disable interrupts on all the column pins. They will be
-            // reenabled by the debounce timer after it's done scanning.
+            // Disable interrupts on all the column pin's lines. They will be
+            // re-enabled by the debounce timer after it's done scanning.
             for (const auto& col_pin : driver.m_config.col_pins) {
                 gpio_intr_disable(col_pin);
             }
@@ -201,12 +211,14 @@ namespace pad {
             }
         }
 
-        static void debounce_timer_cb(TimerHandle_t xTimer) {
+        static void deb_timer_cb(TimerHandle_t xTimer) {
             // Get timer ID
-            auto keypad = static_cast<keypad_t*>(pvTimerGetTimerID(xTimer));
+            const auto& keypad = *static_cast<keypad_t<init_isr_service, isr_flags, queue_length>*>(pvTimerGetTimerID(xTimer));
 
             // Set all row pins high
-            HAL_GPIO_WritePin(keypad->m_config.row_port, keypad->m_row_pins, GPIO_PIN_SET);
+            for (const auto& row_pin : keypad.m_config.row_pins) {
+                gpio_set_level(row_pin, 1);
+            }
 
             // Keypad scanning
             uint8_t row{};
@@ -215,16 +227,16 @@ namespace pad {
 
             [&] {
                 // Get row on which the press was detected
-                for (uint8_t i = 0; i < ROWS; i++) {
+                for (uint8_t r = 0; r < ROWS; r++) {
                     // Set a row pin low and read all its column pins to determine if any of
-                    // them is the key that was pressed, that is, the pin that would be low
-                    HAL_GPIO_WritePin(keypad->m_config.row_port, keypad->m_config.row_pins[i], GPIO_PIN_RESET);
+                    // them is the key that was pressed, that is, the pin that would be low.
+                    gpio_set_level(keypad.m_config.row_pins[r], 0);
 
-                    // If any column is low, then itself and its corresponding row is the right one
-                    for (uint8_t j = 0; j < COLUMNS; j++) {
-                        if (HAL_GPIO_ReadPin(keypad->m_config.col_port, keypad->m_config.col_pins[j]) == GPIO_PIN_RESET) {
-                            row    = i;
-                            column = j;
+                    // If any column is low, then itself and its corresponding row are the right pair
+                    for (uint8_t c = 0; c < COLUMNS; c++) {
+                        if (gpio_get_level(keypad.m_config.col_pins[c]) == 0) {
+                            row    = r;
+                            column = c;
                             found  = true;
                             return;
                         }
@@ -232,19 +244,20 @@ namespace pad {
                 }
             }();
 
-            // Send only first detected keypad press to queue and if we found the key
+            // Send only first detected keypad press to the event queue
             if (found) {
                 xQueueSend(keypad->m_event_queue, &KEYS[row][column], 0);
             }
 
             // Take all row pins back to their default low state
-            HAL_GPIO_WritePin(keypad->m_config.row_port, keypad->m_row_pins, GPIO_PIN_RESET);
+            for (const auto& row_pin : keypad.m_config.row_pins) {
+                gpio_set_level(row_pin, 0);
+            }
 
-            // Clear the interrupt pending flags on all pins before unmasking the EXTI interrupts
-            __HAL_GPIO_EXTI_CLEAR_IT(keypad->m_col_pins);
-
-            // Enable interrupts by unmasking EXTI interrupts
-            EXTI->IMR |= keypad->m_col_pins;
+            // Re-enable interrupts on all the column pins
+            for (const auto& col_pin : keypad.m_config.col_pins) {
+                gpio_intr_enable(col_pin);
+            }
         }
     };
 
