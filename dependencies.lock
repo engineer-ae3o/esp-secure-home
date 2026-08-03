@@ -35,6 +35,54 @@ dependencies:
     - esp32s2
     - esp32s3
     version: 1.3.0
+  esp-idf-lib/i2cdev:
+    component_hash: ad8981cc64533dcaced5107d72e42bcebe79345e194e82795792af531b300ce3
+    dependencies:
+    - name: esp-idf-lib/esp_idf_lib_helpers
+      registry_url: https://components.espressif.com
+      require: private
+      version: '*'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    targets:
+    - esp32
+    - esp32c2
+    - esp32c3
+    - esp32c5
+    - esp32c6
+    - esp32c61
+    - esp32h2
+    - esp32p4
+    - esp32s2
+    - esp32s3
+    version: 2.1.2
+  esp-idf-lib/pcf8574:
+    component_hash: 59283ee5b234c85c3e217c45c4d2bebe6d55b2371d8a85c97d5faefe3943e82f
+    dependencies:
+    - name: esp-idf-lib/esp_idf_lib_helpers
+      registry_url: https://components.espressif.com
+      require: private
+      version: '*'
+    - name: esp-idf-lib/i2cdev
+      registry_url: https://components.espressif.com
+      require: private
+      version: '*'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32
+    - esp32c2
+    - esp32c3
+    - esp32c5
+    - esp32c6
+    - esp32c61
+    - esp32h2
+    - esp32p4
+    - esp32s2
+    - esp32s3
+    version: 1.0.10
   espressif/esp_modem:
     component_hash: 06abed971065e9cb88039e011fd85ec1412c7416d3a3d84541a7a432e8d3f94d
     dependencies:
@@ -62,8 +110,9 @@ dependencies:
 direct_dependencies:
 - esp-idf-lib/esp_idf_lib_helpers
 - esp-idf-lib/hd44780
+- esp-idf-lib/pcf8574
 - espressif/esp_modem
 - joltwallet/littlefs
-manifest_hash: 7c67a72fc648ef95abf961d8b4bc521f05cd8e8773bdb465fc673b3bca09b3a5
+manifest_hash: d1d43229cb03b5806258fc858906683b3478ae1412d8a82575ea85bf9dcf34f3
 target: esp32
 version: 3.0.0

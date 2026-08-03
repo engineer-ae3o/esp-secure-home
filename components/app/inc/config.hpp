@@ -38,4 +38,8 @@ namespace config {
     // SMSC for SIM Card being used. I am using GLO, so this is theirs
     constexpr inline const char SIM_CARD_SMSC[] = "AT+CSCA=\"+2348050020020\"\r";
 
+    // Filesystem
+    constexpr inline const char FILESYSTEM_BASE_PATH[]       = "/lfs";
+    constexpr inline const char FILESYSTEM_PARTITION_LABEL[] = "storage";
+
 } // namespace config
