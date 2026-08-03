@@ -1,110 +1,100 @@
 #pragma once
 
-#include "stm32f1xx_hal.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "utils.hpp"
 
-#include "FreeRTOS.h"
-#include "task.h"
+#include "driver/gpio.h"
+#include "esp_err.h"
 
 #include <utility>
 
 namespace nc {
 
     enum class type_t : uint8_t {
-        REED  = 0x01U,
-        LIMIT = 0x02U,
+        REED  = 0,
+        LIMIT = 1,
     };
 
     struct config_t {
-        GPIO_TypeDef* port{};
-        uint16_t      pin{};
-        IRQn_Type     irq_type{};
-        TaskHandle_t  calling_task_handle{};
+        gpio_num_t   pin{GPIO_NUM_NC};
+        TaskHandle_t calling_task_handle{};
     };
 
-    template<type_t type>
+    template<type_t type, bool init_isr_service = false, int isr_flags = ESP_INTR_FLAG_LEVEL1>
     class switch_t {
-    private:
-        bool     m_is_initialized{};
-        config_t m_config{};
-
     public:
         /**
          * @brief Configures the pin to be used for detection for both
-         *        NC reed and NC limit switches
+         *        NC reed and NC limit switches.
          * 
-         * @note The irq handler still has to be called in the corresponding
-         *       EXTI interrupt handler for the used pins
+         * @return ESP_OK on success, error code otherwise.
          */
-        utils::error_t init(const config_t& config) {
+        esp_err_t init(const config_t& config) {
             if (m_is_initialized) {
-                return utils::error_t::ERR_INVALID_STATE;
+                return ESP_ERR_INVALID_STATE;
             }
 
             m_config = config;
 
-            // Configure the clock
-            TRY(utils::gpio_enable_clk(m_config.port));
-
-            // Set pin as input with interrupt on the rising edge
-            GPIO_InitTypeDef pin_init = {
-                .Pin   = m_config.pin,
-                .Mode  = GPIO_MODE_IT_RISING,
-                .Pull  = GPIO_PULLUP,
-                .Speed = GPIO_SPEED_FREQ_LOW,
+            // Set the pin as input with interrupt on the rising edge
+            const gpio_config_t irq_config = {
+                .pin_bit_mask = 1ULL << std::to_underlying(m_config.pin),
+                .mode         = GPIO_MODE_INPUT,
+                .pull_up_en   = GPIO_PULLUP_ENABLE,
+                .pull_down_en = GPIO_PULLDOWN_DISABLE,
+                .intr_type    = GPIO_INTR_POSEDGE,
             };
-            HAL_GPIO_Init(m_config.port, &pin_init);
+            TRY(gpio_config(&irq_config));
 
-            // Enable interrupt and set priority to lowest
-            HAL_NVIC_SetPriority(m_config.irq_type, 15, 0);
-            HAL_NVIC_EnableIRQ(m_config.irq_type);
+            if constexpr (init_isr_service) {
+                TRY_WITH_FUNC(gpio_install_isr_service(isr_flags), cleanup());
+            }
+
+            // Add the ISR for the IRQ pin
+            TRY_WITH_FUNC(gpio_isr_handler_add(m_config.pin, irq_handler, this), cleanup());
 
             m_is_initialized = true;
-
-            return utils::error_t::NONE;
+            return ESP_OK;
         }
 
         /**
-         * @brief Deinitializes the pin and sets as analog to reduce power
-         *        consumption on the pin. Also disables the corresponding NVIC irq
+         * @brief Deinitializes the gpio pin for the switch's pin.
+         * 
+         * @return ESP_OK on success, error code otherwise.
          */
-        utils::error_t deinit() {
+        esp_err_t deinit() {
             if (!m_is_initialized) {
-                return utils::error_t::ERR_INVALID_STATE;
+                return ESP_ERR_INVALID_STATE;
             }
 
-            // Set pin as analog to reduce power draw
-            GPIO_InitTypeDef pin_deinit = {
-                .Pin   = m_config.pin,
-                .Mode  = GPIO_MODE_ANALOG,
-                .Pull  = GPIO_NOPULL,
-                .Speed = GPIO_SPEED_FREQ_LOW,
-            };
-            HAL_GPIO_Init(m_config.port, &pin_deinit);
+            cleanup();
+            return ESP_OK;
+        }
 
-            HAL_NVIC_DisableIRQ(m_config.irq_type);
+    private:
+        bool     m_is_initialized{};
+        config_t m_config{};
+
+        void cleanup() {
+            gpio_intr_disable(m_config.pin);
+            gpio_isr_handler_remove(m_config.pin);
+            gpio_reset_pin(m_config.pin);
+
+            if constexpr (init_isr_service) {
+                gpio_uninstall_isr_service();
+            }
 
             m_config         = {};
             m_is_initialized = false;
-
-            return utils::error_t::NONE;
         }
 
-        /**
-         * @brief Sends a task notification to the task that is to
-         *        wait for the switch breaking detection
-         * 
-         * @note This has to be called from the irq handler in the
-         *       interrupt vector table for the used gpio pin
-         */
-        void irq_handler() {
-            // Clear the interrupt pending flag
-            __HAL_GPIO_EXTI_CLEAR_IT(m_config.pin);
-
-            // Send notification to calling task
+        static void irq_handler(void* arg) {
+            const auto& driver = *static_cast<switch_t<type, init_isr_service, isr_flags>*>(arg);
+            // Send notification to the calling task
             BaseType_t higher_priority_task_woken{};
-            xTaskNotifyFromISR(m_config.calling_task_handle, std::to_underlying(type), eSetBits, &higher_priority_task_woken);
+            xTaskNotifyFromISR(driver->m_config.calling_task_handle, std::to_underlying(type), eSetBits, &higher_priority_task_woken);
             portYIELD_FROM_ISR(higher_priority_task_woken);
         }
     };
