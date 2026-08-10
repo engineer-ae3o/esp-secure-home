@@ -1,5 +1,4 @@
 #include "freertos/FreeRTOS.h"
-#include "freertos/timers.h"
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -9,69 +8,30 @@
 #include "config.hpp"
 #include "keypad.hpp"
 #include "switch.hpp"
+#include "display.hpp"
 #include "secure_system.hpp"
-
-#include "i2cdev.h"
-#include "hd44780.h"
-#include "pcf8574.h"
 
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_littlefs.h"
 
+
 namespace tasks {
 
     namespace {
 
-        // LCD handle
-        i2c_dev_t g_pcf8574{};
-
-        // LCD config
-        constexpr hd44780 g_hd44780_config = {
-            .write_cb =
-                [](const hd44780* lcd, uint8_t data) {
-                    // Keep track of consecutive write errors
-                    static uint32_t consv_err_counter = 0;
-                    if (auto ret = pcf8574_port_write(&g_pcf8574, data); ret != ESP_OK) {
-                        ESP_LOGW("LCD", "Failed to write data to LCD: %s", esp_err_to_name(ret));
-                        consv_err_counter++;
-                        if (consv_err_counter >= config::MAX_CONSV_ERRORS) {
-                            ESP_LOGE("LCD", "Too many write failures: %u. Rebooting system", consv_err_counter);
-                            utils::reboot();
-                        }
-                    } else {
-                        consv_err_counter++;
-                    }
-                    return 0;
-                },
-            .pins =
-                {
-                    .rs = 0,
-                    .e  = 2,
-                    .d4 = 4,
-                    .d5 = 5,
-                    .d6 = 6,
-                    .d7 = 7,
-                    .bl = 3,
-                },
-            .font      = HD44780_FONT_5X8,
-            .lines     = 2,
-            .backlight = false,
-        };
-
         void deinit_all() {
-            ESP_LOGI("Info", "Deinitializing the system. Cleaning resources");
-            TRY_THEN_LOG(pcf8574_free_desc(&g_pcf8574), "Failed to free PCF8574 resources");
-            TRY_THEN_LOG(i2cdev_done(), "Failed to cleanup the I2C subsystem/interface");
-            TRY_THEN_LOG(ss::deinit(), "Failed to deinitialize the secure subsystem");
-            TRY_THEN_LOG(esp_vfs_littlefs_unregister(config::FILESYSTEM_BASE_PATH), "Failed to unmount filesystem");
-            ESP_LOGI("Info", "Resources cleaned up. Rebooting.......");
+            ESP_LOGI("Info", "Deinitializing the system. Cleaning resources.");
+            TRY_THEN_LOG(display::shutdown_screen(), "Failed to display the power down screen.");
+            TRY_THEN_LOG(display::deinit(), "Failed to deinitialize the display.");
+            TRY_THEN_LOG(crypto::deinit(), "Failed to deinitialize the secure subsystem.");
+            TRY_THEN_LOG(esp_vfs_littlefs_unregister(config::FILESYSTEM_BASE_PATH), "Failed to unmount filesystem.");
+            ESP_LOGI("Info", "Resources cleaned up.");
         }
 
         void init_all() {
             using namespace config;
-            using namespace utils;
 
             constexpr const char* TAG = "Reset Reason";
             switch (auto reason = esp_reset_reason(); reason) {
@@ -114,7 +74,7 @@ namespace tasks {
             }
 
             // Register a shutdown handler to get called before any reboot
-            TRY_WITH_FUNC_VOID(esp_register_shutdown_handler(deinit_all), fatal());
+            TRY_WITH_FUNC_VOID(esp_register_shutdown_handler(deinit_all), utils::fatal());
 
             // Mount the filesystem
             constexpr esp_vfs_littlefs_conf_t config = {
@@ -127,17 +87,16 @@ namespace tasks {
                 .dont_mount             = 0,
                 .grow_on_mount          = 1,
             };
-            TRY_WITH_FUNC_VOID(esp_vfs_littlefs_register(&config), fatal());
+            TRY_WITH_FUNC_VOID(esp_vfs_littlefs_register(&config), utils::fatal());
 
-            // Initialize the secure and crypto interface
-            TRY_WITH_FUNC_VOID(ss::init(), fatal());
+            // Initialize the crypto interface
+            TRY_WITH_FUNC_VOID(crypto::init(), utils::fatal());
 
-            // Initialize the I2C interface/subsystem
-            TRY_WITH_FUNC_VOID(i2cdev_init(), fatal());
-
-            // Initialize the PCF8574 and the LCD
-            TRY_WITH_FUNC_VOID(pcf8574_init_desc(&g_pcf8574, LCD_ADDR, LCD_PORT, LCD_SDA, LCD_SCL), fatal());
-            TRY_WITH_FUNC_VOID(hd44780_init(&g_hd44780_config), fatal());
+            // Initialize the display
+            TRY_WITH_FUNC_VOID(display::init(), utils::fatal());
+            TRY_WITH_FUNC_VOID(display::clear_screen(), utils::fatal());
+            TRY_WITH_FUNC_VOID(display::backlight_on(), utils::fatal());
+            TRY_WITH_FUNC_VOID(display::bootup_screen(), utils::fatal());
         }
 
         // Tasks
@@ -149,7 +108,17 @@ namespace tasks {
     } // namespace
 
     void run() {
+        // Initialize all used resources
         init_all();
+
+        constexpr const char* TAG = "Main";
+
+        // Create the tasks
+        BaseType_t ret = xTaskCreate(display_task, "display_task", config::DISPLAY_TASK_STACK, nullptr, config::DISPLAY_TASK_PRIORITY, nullptr);
+        if (ret != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create the display task");
+            utils::fatal();
+        }
     }
 
 } // namespace tasks

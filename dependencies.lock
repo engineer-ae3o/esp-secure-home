@@ -114,5 +114,5 @@ direct_dependencies:
 - espressif/esp_modem
 - joltwallet/littlefs
 manifest_hash: d1d43229cb03b5806258fc858906683b3478ae1412d8a82575ea85bf9dcf34f3
-target: esp32
+target: esp32s3
 version: 3.0.0

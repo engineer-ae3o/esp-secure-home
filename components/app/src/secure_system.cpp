@@ -1,6 +1,7 @@
 #include "secure_system.hpp"
 
-namespace ss {
+
+namespace crypto {
 
     esp_err_t init() {
         return ESP_OK;
@@ -10,4 +11,4 @@ namespace ss {
         return ESP_OK;
     }
 
-} // namespace ss
+} // namespace crypto

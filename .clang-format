@@ -1,5 +1,4 @@
 ---
-Language: Cpp
 BasedOnStyle: LLVM
 Standard: Latest
 
@@ -8,7 +7,7 @@ TabWidth: 4
 UseTab: Never
 IndentCaseLabels: true
 
-ColumnLimit: 140
+ColumnLimit: 150
 InsertBraces: true
 
 PointerAlignment: Left
@@ -21,12 +20,11 @@ SpacesInParentheses: false
 SpacesInSquareBrackets: false
 SpaceAfterTemplateKeyword: false
 BreakAfterAttributes: Never
-
-SeparateDefinitionBlocks: Always
-MaxEmptyLinesToKeep: 1
+SeparateDefinitionBlocks: Leave
+MaxEmptyLinesToKeep: 2
 
 NamespaceIndentation: All
-IndentExternBlock: Indent
+IndentExternBlock: NoIndent
 BreakBeforeBraces: Custom
 BreakTemplateDeclarations: Yes
 AccessModifierOffset: -4
