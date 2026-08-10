@@ -12,7 +12,7 @@ namespace display {
 
     [[nodiscard]] esp_err_t deinit();
 
-    [[nodiscard]] esp_err_t put_char(unsigned char c, uint8_t column, uint8_t line);
+    [[nodiscard]] esp_err_t put_char(char c, uint8_t column, uint8_t line);
 
     [[nodiscard]] esp_err_t println(std::string_view msg, uint8_t line, bool pad_to_whitespace = true);
 

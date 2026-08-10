@@ -3,6 +3,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
+#include "portmacro.h"
 #include "utils.hpp"
 #include "tasks.hpp"
 #include "config.hpp"
@@ -22,12 +23,12 @@ namespace tasks {
     namespace {
 
         void deinit_all() {
-            ESP_LOGI("Info", "Deinitializing the system. Cleaning resources.");
-            TRY_THEN_LOG(display::shutdown_screen(), "Failed to display the power down screen.");
-            TRY_THEN_LOG(display::deinit(), "Failed to deinitialize the display.");
-            TRY_THEN_LOG(crypto::deinit(), "Failed to deinitialize the secure subsystem.");
-            TRY_THEN_LOG(esp_vfs_littlefs_unregister(config::FILESYSTEM_BASE_PATH), "Failed to unmount filesystem.");
-            ESP_LOGI("Info", "Resources cleaned up.");
+            ESP_LOGI("Info", "Deinitializing the system. Cleaning resources");
+            TRY_THEN_LOG(display::shutdown_screen(), "Failed to display the power down screen");
+            TRY_THEN_LOG(display::deinit(), "Failed to deinitialize the display");
+            TRY_THEN_LOG(crypto::deinit(), "Failed to deinitialize the secure subsystem");
+            TRY_THEN_LOG(esp_vfs_littlefs_unregister(config::FILESYSTEM_BASE_PATH), "Failed to unmount filesystem");
+            ESP_LOGI("Info", "Resources cleaned up");
         }
 
         void init_all() {
@@ -102,6 +103,7 @@ namespace tasks {
         // Tasks
         [[noreturn]] void display_task(void* arg) {
             while (true) {
+                vTaskDelay(portMAX_DELAY);
             }
         }
 
