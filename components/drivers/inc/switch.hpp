@@ -16,8 +16,9 @@
 namespace nc {
 
     enum class type_t : uint8_t {
-        REED  = 1U << 0,
-        LIMIT = 1U << 1,
+        REED   = 1U << 3, // Arbitrary bit position
+        TAMPER = 1U << 5, // Arbitrary bit position
+        COUNT  = 2,       // Keep rack of the number of supported switch types
     };
 
     struct config_t {
@@ -30,7 +31,7 @@ namespace nc {
     public:
         /**
          * @brief Configures the pin to be used for detection for both
-         *        NC reed and NC limit switches.
+         *        NC reed and NC tamper switches.
          * 
          * @return ESP_OK on success, error code otherwise.
          */

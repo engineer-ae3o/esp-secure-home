@@ -24,9 +24,11 @@ namespace config {
     constexpr inline uint32_t LCD_ROWS    = 2;
 
     // SIM800L UART pins
-    constexpr inline gpio_num_t GSM_GPIO_TX_PIN  = GPIO_NUM_17;
-    constexpr inline gpio_num_t GSM_GPIO_RX_PIN  = GPIO_NUM_18;
-    constexpr inline gpio_num_t GSM_GPIO_RST_PIN = GPIO_NUM_21;
+    constexpr inline gpio_num_t  GSM_GPIO_TX_PIN  = GPIO_NUM_17;
+    constexpr inline gpio_num_t  GSM_GPIO_RX_PIN  = GPIO_NUM_18;
+    constexpr inline gpio_num_t  GSM_GPIO_RST_PIN = GPIO_NUM_21;
+    constexpr inline uint32_t    GSM_BAUDRATE     = 9600;
+    constexpr inline const char* GLO_APN          = "gloflat";
 
     // Keypad matrix pins (4x4)
     constexpr inline std::array<gpio_num_t, 4> KEYPAD_ROW_PINS = {{
@@ -66,5 +68,8 @@ namespace config {
 
     constexpr inline uint32_t SWITCH_TASK_STACK    = 2048;
     constexpr inline uint32_t SWITCH_TASK_PRIORITY = 12;
+
+    constexpr inline uint32_t SECURE_TASK_STACK    = 8192;
+    constexpr inline uint32_t SECURE_TASK_PRIORITY = 10;
 
 } // namespace config

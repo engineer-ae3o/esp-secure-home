@@ -2,7 +2,6 @@
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
-#include "portmacro.h"
 
 #include "utils.hpp"
 #include "tasks.hpp"
@@ -15,8 +14,12 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "portmacro.h"
 #include "esp_system.h"
 #include "esp_littlefs.h"
+
+#include <cstdint>
+#include <utility>
 
 
 namespace tasks {
@@ -105,14 +108,64 @@ namespace tasks {
             TRY_WITH_FUNC_VOID(gsm::init(), utils::fatal());
         }
 
+        QueueHandle_t g_switch_broken_event_queue{};
+
         // Tasks
         [[noreturn]] void display_task(void* arg) {
+            constexpr const char* TAG = "Display_Task";
+            ESP_LOGI(TAG, "Display_Task started");
+
+            // Initialize the keypad
+            pad::keypad_t<> keypad;
+            TRY_WITH_FUNC_VOID(keypad.init({.row_pins = config::KEYPAD_ROW_PINS, .col_pins = config::KEYPAD_COLUMN_PINS}), utils::fatal());
+
+            // get_event_queue() only fails if called when not initialized. Safe to get value directly
+            auto* event_queue = keypad.get_event_queue().value();
+            char  recv_key{};
+
             while (true) {
-                vTaskDelay(portMAX_DELAY);
+                auto ret = xQueueReceive(event_queue, &recv_key, 0);
+                if (ret == pdPASS) {
+                    ESP_LOGI(TAG, "Key pressed: %c", recv_key);
+                }
+
+                vTaskDelay(pdMS_TO_TICKS(100));
             }
         }
 
         [[noreturn]] void switch_task(void* arg) {
+            constexpr const char* TAG = "Switch_Task";
+            ESP_LOGI(TAG, "Switch_Task started");
+
+            // Initialize the reed and tamper switches
+            nc::switch_t<nc::type_t::REED> reed;
+            TRY_WITH_FUNC_VOID(reed.init({.pin = config::REED_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
+
+            nc::switch_t<nc::type_t::TAMPER> tamper;
+            TRY_WITH_FUNC_VOID(tamper.init({.pin = config::TAMPER_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
+
+            while (true) {
+                uint32_t notification{};
+                xTaskNotifyWait(0, UINT32_MAX, &notification, portMAX_DELAY);
+
+                if (notification & std::to_underlying(nc::type_t::REED)) {
+                    ESP_LOGI(TAG, "Reed switch broken");
+                    constexpr auto reed_event = nc::type_t::REED;
+                    xQueueSend(g_switch_broken_event_queue, &reed_event, portMAX_DELAY);
+                }
+
+                if (notification & std::to_underlying(nc::type_t::TAMPER)) {
+                    ESP_LOGI(TAG, "Tamper switch broken");
+                    constexpr auto tamper_event = nc::type_t::TAMPER;
+                    xQueueSend(g_switch_broken_event_queue, &tamper_event, portMAX_DELAY);
+                }
+            }
+        }
+
+        [[noreturn]] void secure_system_task(void* arg) {
+            constexpr const char* TAG = "Secure_Task";
+            ESP_LOGI(TAG, "Secure_Task started");
+
             while (true) {
                 vTaskDelay(portMAX_DELAY);
             }
@@ -126,10 +179,23 @@ namespace tasks {
 
         constexpr const char* TAG = "Tasks";
 
+        // Create the queue in which to pass all switch broken events to
+        g_switch_broken_event_queue = xQueueCreate(std::to_underlying(nc::type_t::COUNT), sizeof(nc::type_t));
+        if (g_switch_broken_event_queue == nullptr) {
+            ESP_LOGE(TAG, "Failed to create the switch queue");
+            utils::fatal();
+        }
+
         // Create the tasks
         BaseType_t ret = xTaskCreate(display_task, "display_task", config::DISPLAY_TASK_STACK, nullptr, config::DISPLAY_TASK_PRIORITY, nullptr);
         if (ret != pdPASS) {
             ESP_LOGE(TAG, "Failed to create the display task");
+            utils::fatal();
+        }
+
+        ret = xTaskCreate(secure_system_task, "secure_system_task", config::SECURE_TASK_STACK, nullptr, config::SECURE_TASK_PRIORITY, nullptr);
+        if (ret != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create the secure system task");
             utils::fatal();
         }
 
