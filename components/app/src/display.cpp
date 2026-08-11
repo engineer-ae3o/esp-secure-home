@@ -1,5 +1,6 @@
-#include "esp_err.h"
-#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "utils.hpp"
 #include "config.hpp"
 #include "display.hpp"
@@ -7,6 +8,9 @@
 #include "i2cdev.h"
 #include "hd44780.h"
 #include "pcf8574.h"
+
+#include "esp_err.h"
+#include "esp_log.h"
 
 #include "driver/gpio.h"
 
@@ -24,9 +28,6 @@ namespace display {
         i2c_dev_t g_pcf8574{};
         bool      g_is_initialized = false;
 
-        constexpr uint32_t POWER_ON_SCREEN_WAIT_MS   = 1500;
-        constexpr uint32_t POWER_DOWN_SCREEN_WAIT_MS = POWER_ON_SCREEN_WAIT_MS;
-
         // LCD config
         constinit hd44780_t g_hd44780_config = {
             .write_cb =
@@ -41,7 +42,6 @@ namespace display {
                         }
                         return ret;
                     }
-
                     consc_err_counter = 0;
                     return ESP_OK;
                 },
@@ -60,6 +60,9 @@ namespace display {
             .backlight = false,
         };
 
+        constexpr uint32_t POWER_ON_SCREEN_WAIT_MS   = 1500;
+        constexpr uint32_t POWER_DOWN_SCREEN_WAIT_MS = POWER_ON_SCREEN_WAIT_MS;
+
         void cleanup() {
             TRY_THEN_LOG(gpio_set_level(config::LCD_LED_PIN, 0), "Failed to power down the LCD backlight");
             TRY_THEN_LOG(gpio_reset_pin(config::LCD_LED_PIN), "Failed to reset the LCD backlight gpio pin");
@@ -76,8 +79,8 @@ namespace display {
         }
 
         TRY(i2cdev_init());
-        TRY(pcf8574_init_desc(&g_pcf8574, config::LCD_ADDR, config::LCD_PORT, config::LCD_SDA_PIN, config::LCD_SCL_PIN));
-        TRY(hd44780_init(&g_hd44780_config));
+        TRY_WITH_FUNC(pcf8574_init_desc(&g_pcf8574, config::LCD_ADDR, config::LCD_PORT, config::LCD_SDA_PIN, config::LCD_SCL_PIN), cleanup());
+        TRY_WITH_FUNC(hd44780_init(&g_hd44780_config), cleanup());
 
         constexpr gpio_config_t backlight_config = {
             .pin_bit_mask = 1ULL << std::to_underlying(config::LCD_LED_PIN),
@@ -86,7 +89,7 @@ namespace display {
             .pull_down_en = GPIO_PULLDOWN_DISABLE,
             .intr_type    = GPIO_INTR_DISABLE,
         };
-        TRY(gpio_config(&backlight_config));
+        TRY_WITH_FUNC(gpio_config(&backlight_config), cleanup());
 
         g_is_initialized = true;
         return ESP_OK;

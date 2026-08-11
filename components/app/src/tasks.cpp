@@ -2,14 +2,15 @@
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
-
 #include "portmacro.h"
+
 #include "utils.hpp"
 #include "tasks.hpp"
 #include "config.hpp"
 #include "keypad.hpp"
 #include "switch.hpp"
 #include "display.hpp"
+#include "sim800l.hpp"
 #include "secure_system.hpp"
 
 #include "esp_err.h"
@@ -26,7 +27,8 @@ namespace tasks {
             ESP_LOGI("Info", "Deinitializing the system. Cleaning resources");
             TRY_THEN_LOG(display::shutdown_screen(), "Failed to display the power down screen");
             TRY_THEN_LOG(display::deinit(), "Failed to deinitialize the display");
-            TRY_THEN_LOG(crypto::deinit(), "Failed to deinitialize the secure subsystem");
+            TRY_THEN_LOG(gsm::deinit(), "Failed to deinitialize the SIM800L module");
+            TRY_THEN_LOG(crypto::deinit(), "Failed to deinitialize the crypto interface");
             TRY_THEN_LOG(esp_vfs_littlefs_unregister(config::FILESYSTEM_BASE_PATH), "Failed to unmount filesystem");
             ESP_LOGI("Info", "Resources cleaned up");
         }
@@ -98,10 +100,19 @@ namespace tasks {
             TRY_WITH_FUNC_VOID(display::clear_screen(), utils::fatal());
             TRY_WITH_FUNC_VOID(display::backlight_on(), utils::fatal());
             TRY_WITH_FUNC_VOID(display::bootup_screen(), utils::fatal());
+
+            // Initialize the SIM800L module. The SIM800L requires around 2-3s after power on to fully stablize.
+            TRY_WITH_FUNC_VOID(gsm::init(), utils::fatal());
         }
 
         // Tasks
         [[noreturn]] void display_task(void* arg) {
+            while (true) {
+                vTaskDelay(portMAX_DELAY);
+            }
+        }
+
+        [[noreturn]] void switch_task(void* arg) {
             while (true) {
                 vTaskDelay(portMAX_DELAY);
             }
@@ -113,12 +124,18 @@ namespace tasks {
         // Initialize all used resources
         init_all();
 
-        constexpr const char* TAG = "Main";
+        constexpr const char* TAG = "Tasks";
 
         // Create the tasks
         BaseType_t ret = xTaskCreate(display_task, "display_task", config::DISPLAY_TASK_STACK, nullptr, config::DISPLAY_TASK_PRIORITY, nullptr);
         if (ret != pdPASS) {
             ESP_LOGE(TAG, "Failed to create the display task");
+            utils::fatal();
+        }
+
+        ret = xTaskCreate(switch_task, "switch_task", config::SWITCH_TASK_STACK, nullptr, config::SWITCH_TASK_PRIORITY, nullptr);
+        if (ret != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create the switch task");
             utils::fatal();
         }
     }

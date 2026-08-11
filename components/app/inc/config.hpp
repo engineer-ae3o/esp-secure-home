@@ -1,10 +1,13 @@
 #pragma once
 
 
+#include "sim800l.hpp"
+
 #include "driver/i2c_master.h"
 #include "driver/gpio.h"
 
 #include <array>
+#include <string_view>
 
 
 namespace config {
@@ -45,13 +48,14 @@ namespace config {
     constexpr inline gpio_num_t TAMPER_SWITCH_PIN = GPIO_NUM_13;
 
     // SMSC for the used SIM Card (Glo Nigeria)
-    constexpr inline char     SIM_CARD_SMSC[]  = "+2348050020020";
-    constexpr inline uint32_t PHONE_NUMBER_LEN = 11;
-    constexpr inline uint32_t MAX_PNUMBERS     = 10;
+    constexpr inline std::string_view SIM_CARD_SMSC = "+2348050020020";
+    constexpr inline uint32_t         MAX_PNUMBERS  = 10;
+
+    static_assert(SIM_CARD_SMSC.length());
 
     // Filesystem
-    constexpr inline const char FILESYSTEM_BASE_PATH[]       = "/lfs";
-    constexpr inline const char FILESYSTEM_PARTITION_LABEL[] = "storage";
+    constexpr inline const char* FILESYSTEM_BASE_PATH       = "/lfs";
+    constexpr inline const char* FILESYSTEM_PARTITION_LABEL = "storage";
 
     // Error tracking
     constexpr inline uint32_t MAX_CONSC_ERRORS = 5;
@@ -59,5 +63,8 @@ namespace config {
     // Task stack configuration
     constexpr inline uint32_t DISPLAY_TASK_STACK    = 4096;
     constexpr inline uint32_t DISPLAY_TASK_PRIORITY = 8;
+
+    constexpr inline uint32_t SWITCH_TASK_STACK    = 2048;
+    constexpr inline uint32_t SWITCH_TASK_PRIORITY = 12;
 
 } // namespace config

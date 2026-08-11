@@ -1,4 +1,5 @@
 #include "secure_system.hpp"
+#include "sim800l.hpp"
 #include "config.hpp"
 
 #include <array>
@@ -41,7 +42,7 @@ namespace crypto {
         using digest_t   = std::array<uint8_t, HASH_DIGEST_LEN>;
         using nonce_t    = std::array<uint8_t, NONCE_LEN>;
         using auth_tag_t = std::array<uint8_t, AUTH_TAG_LEN>;
-        using pnumber_t  = std::array<char, config::PHONE_NUMBER_LEN>;
+        using pnumber_t  = std::array<char, gsm::PHONE_NUMBER_LEN>;
         using pnumbers_t = std::array<pnumber_t, config::MAX_PNUMBERS>;
 
         // The salt will be randomly generated at first boot
