@@ -11,6 +11,7 @@
 #include "esp_modem_c_api_types.h"
 
 #include <cstring>
+#include <utility>
 
 
 namespace gsm {
@@ -60,7 +61,7 @@ namespace gsm {
         dte_config.uart_config.baud_rate  = config::GSM_BAUDRATE;
 
         // DCE configuation
-        constexpr esp_modem_dce_config_t dce_config = ESP_MODEM_DCE_DEFAULT_CONFIG(config::GLO_APN);
+        constexpr esp_modem_dce_config_t dce_config = ESP_MODEM_DCE_DEFAULT_CONFIG(static_cast<const char*>(config::GLO_APN));
 
         // Initialize the SIM800L
         g_dce_handle = esp_modem_new_dev(ESP_MODEM_DCE_SIM800, &dte_config, &dce_config, g_esp_netif);
@@ -71,7 +72,7 @@ namespace gsm {
         }
 
         // Get the IMSI
-        if (auto ret = esp_modem_get_imei(g_dce_handle, g_imsi.data()); ret != ESP_OK) {
+        if (auto ret = esp_modem_get_imsi(g_dce_handle, g_imsi.data()); ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to read the IMSI: %s", esp_err_to_name(ret));
             cleanup();
             return ret;
@@ -104,7 +105,7 @@ namespace gsm {
         } else if (pin_state == ESP_MODEM_SIM_PIN_STATE_READY) {
             ESP_LOGI(TAG, "SIM card present and ready");
         } else {
-            ESP_LOGW(TAG, "SIM card present but requires unlocking. State = %d", pin_state);
+            ESP_LOGW(TAG, "SIM card present but requires unlocking. State = %d", std::to_underlying(pin_state));
             return ESP_FAIL;
         }
 
@@ -116,8 +117,15 @@ namespace gsm {
             return ESP_ERR_INVALID_STATE;
         }
 
-        if (sms == nullptr || strlen(sms) > MAX_SMS_LEN || strlen(sms) == 0 || number == nullptr || strlen(number) != PHONE_NUMBER_LEN) {
+        if (sms == nullptr || number == nullptr) {
             return ESP_ERR_INVALID_ARG;
+        }
+
+        const size_t sms_len    = strlen(sms);
+        const size_t number_len = strlen(number);
+
+        if (sms_len > MAX_SMS_LEN || sms_len == 0 || number_len != PHONE_NUMBER_LEN) {
+            return ESP_ERR_INVALID_SIZE;
         }
 
         if (check_sim_status) {

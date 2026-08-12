@@ -1,35 +1,26 @@
 #include "secure_system.hpp"
 #include "sim800l.hpp"
 #include "config.hpp"
+#include "utils.hpp"
 
 #include <array>
+#include <cerrno>
 #include <cstdio>
+#include <cstddef>
+#include <cstring>
 #include <utility>
+
 
 namespace crypto {
 
     namespace {
 
-        // File identifiers for the different files being used
-        enum class file_name_t : uint8_t {
-            COUNTER,  // Stores the boot cycle counter
-            PASSWORD, // Stores the hashed password and salt
-            PNUMBERS, // Stores the encrypted password blob
-            COUNT,    // Keep track of the number of values in this enum
-        };
+        // Directory to store the relevant files
+        constexpr const char*          DIRECTORY     = "crypto";
+        constexpr std::array<char, 20> PSWD_FILE     = {};
+        constexpr std::array<char, 20> PNUMBERS_FILE = {};
 
-        // Lookup table for the files being used
-        constexpr std::array<const char*, std::to_underlying(file_name_t::COUNT)> FILE_LUT = {{
-            // Add a little bit of obfuscation to the file names since they get stored directly in
-            // flash. Besides, they will be accessed with their more readable enum counterparts.
-            // Doesn't do a whole lot in the grand scheme of things, but still, doesn't hurt.
-            [std::to_underlying(file_name_t::COUNTER)]  = "/lfs/getds/fchdvqv",
-            [std::to_underlying(file_name_t::PASSWORD)] = "/lfs/getds/yacnywo",
-            [std::to_underlying(file_name_t::PNUMBERS)] = "/lfs/getds/cqwogto",
-        }};
-
-        // Counter in flash counting number of boot cycles
-        uint32_t g_boot_cycle_counter{};
+        constexpr const char* TAG = "Secure_system";
 
         // Constants representing length of the digest, the salt, authentication tag and nonce lengths in bytes.
         constexpr uint32_t HASH_DIGEST_LEN = 32;
@@ -43,7 +34,7 @@ namespace crypto {
         using nonce_t    = std::array<uint8_t, NONCE_LEN>;
         using auth_tag_t = std::array<uint8_t, AUTH_TAG_LEN>;
         using pnumber_t  = std::array<char, gsm::PHONE_NUMBER_LEN>;
-        using pnumbers_t = std::array<pnumber_t, config::MAX_PNUMBERS>;
+        using pnumbers_t = std::array<pnumber_t, MAX_PNUMBERS>;
 
         // The salt will be randomly generated at first boot
         // since only one password is being used at a time.
@@ -67,17 +58,80 @@ namespace crypto {
         [[maybe_unused]] password_file_data_t g_pswd_file_storage{};
         [[maybe_unused]] pnumbers_file_data_t g_pnumbers_file_storage{};
 
+        // File handles
+        FILE* g_pswd_file{};
+        FILE* g_pnumbers_file{};
+
         bool g_is_initialized = false;
 
         // Helpers
         bool is_first_boot() {
+            // Try to open the files in read write in binary mode
             return false;
         }
 
-        void on_first_boot() {
+        void delete_files_and_dir() {
+            remove(PSWD_FILE.data());
+            remove(PNUMBERS_FILE.data());
         }
 
-        void cleanup() {
+        void create_files_and_dir() {
+            // Create the directory
+
+            // Create the files
+            // NOLINTBEGIN(cppcoreguidelines-owning-memory)
+            g_pswd_file = fopen(PSWD_FILE.data(), "w");
+            if (g_pswd_file == nullptr) {
+                ESP_LOGE(TAG, "Failed to create first file: %s", strerror(errno));
+                delete_files_and_dir();
+                utils::fatal();
+            }
+
+            g_pnumbers_file = fopen(PNUMBERS_FILE.data(), "w");
+            if (g_pswd_file == nullptr) {
+                ESP_LOGE(TAG, "Failed to create second file: %s", strerror(errno));
+                delete_files_and_dir();
+                utils::fatal();
+            }
+            // NOLINTEND(cppcoreguidelines-owning-memory)
+        }
+
+        void open_files() {
+            // Create the files with the read write access specifies and in binary modes
+            // NOLINTBEGIN(cppcoreguidelines-owning-memory)
+            g_pswd_file = fopen(PSWD_FILE.data(), "rb+");
+            if (g_pswd_file == nullptr) {
+                ESP_LOGE(TAG, "Failed to create first file: %s", strerror(errno));
+                delete_files_and_dir();
+                utils::fatal();
+            }
+
+            g_pnumbers_file = fopen(PNUMBERS_FILE.data(), "rb+");
+            if (g_pswd_file == nullptr) {
+                ESP_LOGE(TAG, "Failed to create second file: %s", strerror(errno));
+                delete_files_and_dir();
+                utils::fatal();
+            }
+            // NOLINTEND(cppcoreguidelines-owning-memory)
+        }
+
+        void close_files() {
+            // NOLINTBEGIN(cppcoreguidelines-owning-memory)
+            if (g_pswd_file) {
+                if (fclose(g_pswd_file) != 0) {
+                    ESP_LOGE(TAG, "Failed to close first file. Flushing instead");
+                    fflush(g_pswd_file);
+                }
+                g_pswd_file = nullptr;
+            }
+            if (g_pnumbers_file) {
+                if (fclose(g_pnumbers_file) != 0) {
+                    ESP_LOGE(TAG, "Failed to close second file. Flushing instead");
+                    fflush(g_pnumbers_file);
+                }
+                g_pnumbers_file = nullptr;
+            }
+            // NOLINTEND(cppcoreguidelines-owning-memory)
             g_is_initialized = false;
         }
 
@@ -89,7 +143,9 @@ namespace crypto {
         }
 
         if (is_first_boot()) [[unlikely]] {
-            on_first_boot();
+            create_files_and_dir();
+        } else [[likely]] {
+            open_files();
         }
 
         g_is_initialized = true;
@@ -101,7 +157,7 @@ namespace crypto {
             return ESP_ERR_INVALID_STATE;
         }
 
-        cleanup();
+        close_files();
         return ESP_OK;
     }
 

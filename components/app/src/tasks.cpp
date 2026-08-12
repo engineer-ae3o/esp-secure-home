@@ -28,11 +28,11 @@ namespace tasks {
 
         void deinit_all() {
             ESP_LOGI("Info", "Deinitializing the system. Cleaning resources");
-            TRY_THEN_LOG(display::shutdown_screen(), "Failed to display the power down screen");
-            TRY_THEN_LOG(display::deinit(), "Failed to deinitialize the display");
             TRY_THEN_LOG(gsm::deinit(), "Failed to deinitialize the SIM800L module");
             TRY_THEN_LOG(crypto::deinit(), "Failed to deinitialize the crypto interface");
-            TRY_THEN_LOG(esp_vfs_littlefs_unregister(config::FILESYSTEM_BASE_PATH), "Failed to unmount filesystem");
+            TRY_THEN_LOG(display::shutdown_screen(), "Failed to display the power down screen");
+            TRY_THEN_LOG(display::deinit(), "Failed to deinitialize the display");
+            TRY_THEN_LOG(esp_vfs_littlefs_unregister(static_cast<const char*>(config::FILESYSTEM_BASE_PATH)), "Failed to unmount filesystem");
             ESP_LOGI("Info", "Resources cleaned up");
         }
 
@@ -83,9 +83,9 @@ namespace tasks {
             TRY_WITH_FUNC_VOID(esp_register_shutdown_handler(deinit_all), utils::fatal());
 
             // Mount the filesystem
-            constexpr esp_vfs_littlefs_conf_t config = {
-                .base_path              = FILESYSTEM_BASE_PATH,
-                .partition_label        = FILESYSTEM_PARTITION_LABEL,
+            constexpr esp_vfs_littlefs_conf_t lfs_config = {
+                .base_path              = static_cast<const char*>(FILESYSTEM_BASE_PATH),
+                .partition_label        = static_cast<const char*>(FILESYSTEM_PARTITION_LABEL),
                 .partition              = nullptr,
                 .blockdev               = nullptr,
                 .format_if_mount_failed = 1,
@@ -93,7 +93,7 @@ namespace tasks {
                 .dont_mount             = 0,
                 .grow_on_mount          = 1,
             };
-            TRY_WITH_FUNC_VOID(esp_vfs_littlefs_register(&config), utils::fatal());
+            TRY_WITH_FUNC_VOID(esp_vfs_littlefs_register(&lfs_config), utils::fatal());
 
             // Initialize the crypto interface
             TRY_WITH_FUNC_VOID(crypto::init(), utils::fatal());
@@ -106,14 +106,44 @@ namespace tasks {
 
             // Initialize the SIM800L module. The SIM800L requires around 2-3s after power on to fully stablize.
             TRY_WITH_FUNC_VOID(gsm::init(), utils::fatal());
+            TRY_THEN_LOG(gsm::get_sim_status(), "SIM card not ready"); // Not a fatal error. We'll retry later on.
         }
 
-        QueueHandle_t g_switch_broken_event_queue{};
+        QueueHandle_t g_switch_queue{};
 
         // Tasks
-        [[noreturn]] void display_task(void* arg) {
-            constexpr const char* TAG = "Display_Task";
-            ESP_LOGI(TAG, "Display_Task started");
+        [[noreturn]] void switch_task(void* arg) {
+            constexpr const char* TAG = "Switch_Task";
+            ESP_LOGI(TAG, "Switch_Task started");
+
+            // Initialize the reed and tamper switches
+            nc::switch_t<nc::type_t::REED> reed;
+            TRY_WITH_FUNC_VOID(reed.init({.pin = config::REED_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
+
+            nc::switch_t<nc::type_t::TAMPER> tamper;
+            TRY_WITH_FUNC_VOID(tamper.init({.pin = config::TAMPER_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
+
+            while (true) {
+                uint32_t notification{};
+                xTaskNotifyWait(0, UINT32_MAX, &notification, portMAX_DELAY);
+
+                if (notification & std::to_underlying(nc::type_t::REED)) {
+                    ESP_LOGI(TAG, "Reed switch broken");
+                    constexpr auto reed_event = nc::type_t::REED;
+                    xQueueSend(g_switch_queue, &reed_event, portMAX_DELAY);
+                }
+
+                if (notification & std::to_underlying(nc::type_t::TAMPER)) {
+                    ESP_LOGI(TAG, "Tamper switch broken");
+                    constexpr auto tamper_event = nc::type_t::TAMPER;
+                    xQueueSend(g_switch_queue, &tamper_event, portMAX_DELAY);
+                }
+            }
+        }
+
+        [[noreturn]] void system_task(void* arg) {
+            constexpr const char* TAG = "Secure_Task";
+            ESP_LOGI(TAG, "Secure_Task started");
 
             // Initialize the keypad
             pad::keypad_t<> keypad;
@@ -133,44 +163,6 @@ namespace tasks {
             }
         }
 
-        [[noreturn]] void switch_task(void* arg) {
-            constexpr const char* TAG = "Switch_Task";
-            ESP_LOGI(TAG, "Switch_Task started");
-
-            // Initialize the reed and tamper switches
-            nc::switch_t<nc::type_t::REED> reed;
-            TRY_WITH_FUNC_VOID(reed.init({.pin = config::REED_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
-
-            nc::switch_t<nc::type_t::TAMPER> tamper;
-            TRY_WITH_FUNC_VOID(tamper.init({.pin = config::TAMPER_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
-
-            while (true) {
-                uint32_t notification{};
-                xTaskNotifyWait(0, UINT32_MAX, &notification, portMAX_DELAY);
-
-                if (notification & std::to_underlying(nc::type_t::REED)) {
-                    ESP_LOGI(TAG, "Reed switch broken");
-                    constexpr auto reed_event = nc::type_t::REED;
-                    xQueueSend(g_switch_broken_event_queue, &reed_event, portMAX_DELAY);
-                }
-
-                if (notification & std::to_underlying(nc::type_t::TAMPER)) {
-                    ESP_LOGI(TAG, "Tamper switch broken");
-                    constexpr auto tamper_event = nc::type_t::TAMPER;
-                    xQueueSend(g_switch_broken_event_queue, &tamper_event, portMAX_DELAY);
-                }
-            }
-        }
-
-        [[noreturn]] void secure_system_task(void* arg) {
-            constexpr const char* TAG = "Secure_Task";
-            ESP_LOGI(TAG, "Secure_Task started");
-
-            while (true) {
-                vTaskDelay(portMAX_DELAY);
-            }
-        }
-
     } // namespace
 
     void run() {
@@ -180,22 +172,16 @@ namespace tasks {
         constexpr const char* TAG = "Tasks";
 
         // Create the queue in which to pass all switch broken events to
-        g_switch_broken_event_queue = xQueueCreate(std::to_underlying(nc::type_t::COUNT), sizeof(nc::type_t));
-        if (g_switch_broken_event_queue == nullptr) {
+        g_switch_queue = xQueueCreate(std::to_underlying(nc::type_t::COUNT), sizeof(nc::type_t));
+        if (g_switch_queue == nullptr) {
             ESP_LOGE(TAG, "Failed to create the switch queue");
             utils::fatal();
         }
 
         // Create the tasks
-        BaseType_t ret = xTaskCreate(display_task, "display_task", config::DISPLAY_TASK_STACK, nullptr, config::DISPLAY_TASK_PRIORITY, nullptr);
+        BaseType_t ret = xTaskCreate(system_task, "system_task", config::SYSTEM_TASK_STACK, nullptr, config::SYSTEM_TASK_PRIORITY, nullptr);
         if (ret != pdPASS) {
-            ESP_LOGE(TAG, "Failed to create the display task");
-            utils::fatal();
-        }
-
-        ret = xTaskCreate(secure_system_task, "secure_system_task", config::SECURE_TASK_STACK, nullptr, config::SECURE_TASK_PRIORITY, nullptr);
-        if (ret != pdPASS) {
-            ESP_LOGE(TAG, "Failed to create the secure system task");
+            ESP_LOGE(TAG, "Failed to create the system task");
             utils::fatal();
         }
 
