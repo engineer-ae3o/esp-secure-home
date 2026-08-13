@@ -34,7 +34,7 @@ namespace display {
                         ESP_LOGW("LCD", "Failed to write data to the LCD: %s", esp_err_to_name(ret));
                         consc_err_counter++;
                         if (consc_err_counter >= config::MAX_CONSC_ERRORS) {
-                            ESP_LOGE("LCD", "Too many write failures: %u. Rebooting system", consc_err_counter);
+                            ESP_LOGE("LCD", "Too many write failures: (%u consecutive failures). Rebooting system", consc_err_counter);
                             utils::reboot();
                         }
                         return ret;
@@ -57,7 +57,7 @@ namespace display {
             .backlight = false,
         };
 
-        constexpr uint32_t POWER_ON_SCREEN_WAIT_MS   = 1500;
+        constexpr uint32_t POWER_ON_SCREEN_WAIT_MS   = 2000;
         constexpr uint32_t POWER_DOWN_SCREEN_WAIT_MS = POWER_ON_SCREEN_WAIT_MS;
 
         void cleanup() {

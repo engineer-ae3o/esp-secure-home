@@ -11,7 +11,7 @@
 #include "switch.hpp"
 #include "display.hpp"
 #include "sim800l.hpp"
-#include "secure_system.hpp"
+#include "storage.hpp"
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -30,7 +30,7 @@ namespace tasks {
         void deinit_all() {
             ESP_LOGI("Info", "Deinitializing the system. Cleaning resources");
             TRY_THEN_LOG(gsm::deinit(), "Failed to deinitialize the SIM800L module");
-            TRY_THEN_LOG(crypto::deinit(), "Failed to deinitialize the crypto interface");
+            TRY_THEN_LOG(storage::deinit(), "Failed to deinitialize the storage interface");
             TRY_THEN_LOG(display::shutdown_screen(), "Failed to display the power down screen");
             TRY_THEN_LOG(display::deinit(), "Failed to deinitialize the display");
             TRY_THEN_LOG(esp_vfs_littlefs_unregister(static_cast<const char*>(config::FILESYSTEM_BASE_PATH)), "Failed to unmount filesystem");
@@ -56,6 +56,9 @@ namespace tasks {
                     break;
                 case ESP_RST_INT_WDT:
                     ESP_LOGW(TAG, "Interrupt watchdog reset");
+                    break;
+                case ESP_RST_USB:
+                    ESP_LOGI(TAG, "Reset from the USB controller");
                     break;
                 case ESP_RST_TASK_WDT:
                     ESP_LOGW(TAG, "Task watchdog reset");
@@ -96,8 +99,8 @@ namespace tasks {
             };
             TRY_WITH_FUNC_VOID(esp_vfs_littlefs_register(&lfs_config), utils::fatal());
 
-            // Initialize the crypto interface
-            TRY_WITH_FUNC_VOID(crypto::init(), utils::fatal());
+            // Initialize the storage interface
+            TRY_WITH_FUNC_VOID(storage::init(), utils::fatal());
 
             // Initialize the display
             TRY_WITH_FUNC_VOID(display::init(), utils::fatal());
@@ -108,6 +111,8 @@ namespace tasks {
             // Initialize the SIM800L module. The SIM800L requires around 2-3s after power on to fully stablize.
             TRY_WITH_FUNC_VOID(gsm::init(), utils::fatal());
             TRY_THEN_LOG(gsm::get_sim_status(), "SIM card not ready"); // Not a fatal error. We'll retry later on.
+
+            ESP_LOGI("Init", "Done initiaizing all components");
         }
 
         QueueHandle_t g_switch_queue{};
@@ -145,19 +150,12 @@ namespace tasks {
         }
 
         [[noreturn]] void system_task(void* arg) {
-            constexpr const char* TAG = "Secure_Task";
-            ESP_LOGI(TAG, "Secure_Task started");
+            constexpr const char* TAG = "System_task";
+            ESP_LOGI(TAG, "System_task started");
 
             // Initialize the keypad
             pad::keypad_t<> keypad;
             TRY_WITH_FUNC_VOID(keypad.init({.row_pins = config::KEYPAD_ROW_PINS, .col_pins = config::KEYPAD_COLUMN_PINS}), utils::fatal());
-
-            // Get the IMSI and pass to the crypto module. get_imsi() only fails
-            // if called when not initialized. Safe to extract the value directly
-            gsm::imsi_t imsi = gsm::get_imsi().value();
-            crypto::give_imsi(imsi);
-            imsi.back() = '\0'; // The lenghth of the imsi_t type is much bigger than the actual IMSI. Safe to truncate
-            ESP_LOGI(TAG, "IMSI of SIM Card: %s", imsi.data());
 
             // get_event_queue() only fails if called when not initialized. Safe to extract the value directly
             auto* keypad_event_queue = keypad.get_event_queue().value();
@@ -165,13 +163,15 @@ namespace tasks {
 
             nc::type_t switch_event{};
 
-            bool admin_mode = false;
+            bool admin_mode    = false;
+            bool switch_broken = false;
 
             while (true) {
                 // Check if any switch has been broken
                 auto ret = xQueueReceive(g_switch_queue, &switch_event, 0);
                 if (ret == pdPASS) {
                     // A switch has been broken. Behaviour depends on whether we're in admin mode or not
+                    switch_broken = true;
                     switch (switch_event) {
                         case nc::type_t::REED:
                             sys::reed_switch_broken(admin_mode);
@@ -179,6 +179,7 @@ namespace tasks {
 
                         case nc::type_t::TAMPER:
                             sys::tamper_switch_broken(admin_mode);
+                            break;
 
                         default:
                             ESP_LOGW(TAG, "Invalid switch event");

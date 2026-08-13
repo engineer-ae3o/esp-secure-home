@@ -19,11 +19,11 @@ namespace file {
 
         constexpr const char* TAG = "File";
 
-        constexpr char DIR_NAME[] = "crypto";
+        constexpr char DIR_NAME[] = "storage";
 
         constexpr auto CRYPTO_DIR_PATH    = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME);
-        constexpr auto PSWD_FILE_PATH     = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME, "/", "salt_and_digest.bin");
-        constexpr auto PNUMBERS_FILE_PATH = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME, "/", "encrypted_blob.bin");
+        constexpr auto PSWD_FILE_PATH     = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME, "/", "password.txt");
+        constexpr auto PNUMBERS_FILE_PATH = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME, "/", "phone_numbers.txt");
         constexpr auto SENTINEL_FILE_PATH = utils::concat(config::FILESYSTEM_BASE_PATH, "/", "sentinel.txt");
 
         FILE* g_pswd_file{};

@@ -20,8 +20,7 @@ namespace gsm {
 
         constexpr const char* TAG = "GSM";
 
-        imsi_t g_imsi{};
-        bool   g_is_initialized = false;
+        bool g_is_initialized = false;
 
         esp_modem_dce_t* g_dce_handle{};
         esp_netif_t*     g_esp_netif{};
@@ -71,12 +70,16 @@ namespace gsm {
             return ESP_ERR_NO_MEM;
         }
 
-        // Get the IMSI
-        if (auto ret = esp_modem_get_imsi(g_dce_handle, g_imsi.data()); ret != ESP_OK) {
+        // Read the IMSI
+        std::array<char, CONFIG_ESP_MODEM_C_API_STR_MAX + 1> imsi{};
+        if (auto ret = esp_modem_get_imsi(g_dce_handle, imsi.data()); ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to read the IMSI: %s", esp_err_to_name(ret));
             cleanup();
             return ret;
         }
+
+        imsi.back() = '\0';
+        ESP_LOGI(TAG, "IMSI of SIM Card: %s", imsi.data());
 
         g_is_initialized = true;
         return ESP_OK;
@@ -141,13 +144,6 @@ namespace gsm {
         TRY(esp_modem_sms_txt_mode(g_dce_handle, false));
 
         return ESP_OK;
-    }
-
-    std::expected<imsi_t, esp_err_t> get_imsi() {
-        if (!g_is_initialized) {
-            return std::unexpected(ESP_ERR_INVALID_STATE);
-        }
-        return g_imsi;
     }
 
 } // namespace gsm

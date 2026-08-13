@@ -31,14 +31,14 @@ namespace config {
 
     // Keypad matrix pins (4x4)
     constexpr inline std::array<gpio_num_t, 4> KEYPAD_ROW_PINS = {{
-        GPIO_NUM_6, // Row 0
-        GPIO_NUM_5, // Row 1
-        GPIO_NUM_6, // Row 2
-        GPIO_NUM_7, // Row 3
+        GPIO_NUM_6,  // Row 0
+        GPIO_NUM_7,  // Row 1
+        GPIO_NUM_15, // Row 2
+        GPIO_NUM_16, // Row 3
     }};
 
     constexpr inline std::array<gpio_num_t, 4> KEYPAD_COLUMN_PINS = {{
-        GPIO_NUM_8,  // Column 0
+        GPIO_NUM_3,  // Column 0
         GPIO_NUM_9,  // Column 1
         GPIO_NUM_10, // Column 2
         GPIO_NUM_11, // Column 3
