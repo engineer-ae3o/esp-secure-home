@@ -3,6 +3,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
+#include "system.hpp"
 #include "utils.hpp"
 #include "tasks.hpp"
 #include "config.hpp"
@@ -116,26 +117,28 @@ namespace tasks {
             constexpr const char* TAG = "Switch_Task";
             ESP_LOGI(TAG, "Switch_Task started");
 
+            using enum nc::type_t;
+
             // Initialize the reed and tamper switches
-            nc::switch_t<nc::type_t::REED> reed;
+            nc::switch_t<REED> reed;
             TRY_WITH_FUNC_VOID(reed.init({.pin = config::REED_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
 
-            nc::switch_t<nc::type_t::TAMPER> tamper;
+            nc::switch_t<TAMPER> tamper;
             TRY_WITH_FUNC_VOID(tamper.init({.pin = config::TAMPER_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
 
             while (true) {
                 uint32_t notification{};
                 xTaskNotifyWait(0, UINT32_MAX, &notification, portMAX_DELAY);
 
-                if (notification & std::to_underlying(nc::type_t::REED)) {
+                if (notification & std::to_underlying(REED)) {
                     ESP_LOGI(TAG, "Reed switch broken");
-                    constexpr auto reed_event = nc::type_t::REED;
+                    constexpr auto reed_event = REED;
                     xQueueSend(g_switch_queue, &reed_event, portMAX_DELAY);
                 }
 
-                if (notification & std::to_underlying(nc::type_t::TAMPER)) {
+                if (notification & std::to_underlying(TAMPER)) {
                     ESP_LOGI(TAG, "Tamper switch broken");
-                    constexpr auto tamper_event = nc::type_t::TAMPER;
+                    constexpr auto tamper_event = TAMPER;
                     xQueueSend(g_switch_queue, &tamper_event, portMAX_DELAY);
                 }
             }
@@ -149,15 +152,46 @@ namespace tasks {
             pad::keypad_t<> keypad;
             TRY_WITH_FUNC_VOID(keypad.init({.row_pins = config::KEYPAD_ROW_PINS, .col_pins = config::KEYPAD_COLUMN_PINS}), utils::fatal());
 
-            // get_event_queue() only fails if called when not initialized. Safe to get value directly
-            auto* event_queue = keypad.get_event_queue().value();
+            // Get the IMSI and pass to the crypto module. get_imsi() only fails
+            // if called when not initialized. Safe to extract the value directly
+            gsm::imsi_t imsi = gsm::get_imsi().value();
+            crypto::give_imsi(imsi);
+            imsi.back() = '\0'; // The lenghth of the imsi_t type is much bigger than the actual IMSI. Safe to truncate
+            ESP_LOGI(TAG, "IMSI of SIM Card: %s", imsi.data());
+
+            // get_event_queue() only fails if called when not initialized. Safe to extract the value directly
+            auto* keypad_event_queue = keypad.get_event_queue().value();
             char  recv_key{};
 
+            nc::type_t switch_event{};
+
+            bool admin_mode = false;
+
             while (true) {
-                auto ret = xQueueReceive(event_queue, &recv_key, 0);
+                // Check if any switch has been broken
+                auto ret = xQueueReceive(g_switch_queue, &switch_event, 0);
+                if (ret == pdPASS) {
+                    // A switch has been broken. Behaviour depends on whether we're in admin mode or not
+                    switch (switch_event) {
+                        case nc::type_t::REED:
+                            sys::reed_switch_broken(admin_mode);
+                            break;
+
+                        case nc::type_t::TAMPER:
+                            sys::tamper_switch_broken(admin_mode);
+
+                        default:
+                            ESP_LOGW(TAG, "Invalid switch event");
+                            break;
+                    }
+                }
+
+                // Check for any keypress event
+                ret = xQueueReceive(keypad_event_queue, &recv_key, 0);
                 if (ret == pdPASS) {
                     ESP_LOGI(TAG, "Key pressed: %c", recv_key);
                 }
+
 
                 vTaskDelay(pdMS_TO_TICKS(100));
             }

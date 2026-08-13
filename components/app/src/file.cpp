@@ -86,25 +86,26 @@ namespace file {
         // NOLINTBEGIN(cppcoreguidelines-owning-memory)
 
         FILE* sentinel = fopen(SENTINEL_FILE_PATH.data(), "r");
-        if (sentinel != nullptr) {
+        if (sentinel) [[likely]] {
+            // The file exists. This is not the first boot
             fclose(sentinel);
             return false;
         }
 
         if (errno != ENOENT) {
-            ESP_LOGE(TAG, "Failed to check sentinel file %s: %s", SENTINEL_FILE_PATH.data(), strerror(errno));
+            ESP_LOGE(TAG, "Failed to check the sentinel file %s: %s", SENTINEL_FILE_PATH.data(), strerror(errno));
             utils::fatal();
         }
 
-        // File does not exist -> first boot
+        // Create the file now since it didn't exist previously
         sentinel = fopen(SENTINEL_FILE_PATH.data(), "w");
         if (sentinel == nullptr) {
-            ESP_LOGE(TAG, "Failed to create sentinel file %s: %s", SENTINEL_FILE_PATH.data(), strerror(errno));
+            ESP_LOGE(TAG, "Failed to create the sentinel file %s: %s", SENTINEL_FILE_PATH.data(), strerror(errno));
             utils::fatal();
         }
 
         if (fclose(sentinel) != 0) {
-            ESP_LOGE(TAG, "Failed to close sentinel file %s: %s", SENTINEL_FILE_PATH.data(), strerror(errno));
+            ESP_LOGE(TAG, "Failed to close the sentinel file %s: %s", SENTINEL_FILE_PATH.data(), strerror(errno));
         }
 
         // NOLINTEND(cppcoreguidelines-owning-memory)
@@ -151,17 +152,17 @@ namespace file {
 
         if (fseek(handle, 0, SEEK_SET) != 0) {
             ESP_LOGE(TAG, "Failed to seek to beginning of %s: %s", path, strerror(errno));
-            return ESP_FAIL;
+            return ESP_ERR_INVALID_RESPONSE;
         }
 
         if (fwrite(buf.data(), 1, buf.size(), handle) != buf.size()) {
             ESP_LOGE(TAG, "Failed to write buffer to %s: %s", path, strerror(errno));
-            return ESP_FAIL;
+            return ESP_ERR_INVALID_RESPONSE;
         }
 
         if (fflush(handle) != 0) {
             ESP_LOGE(TAG, "Failed to flush %s: %s", path, strerror(errno));
-            return ESP_FAIL;
+            return ESP_ERR_INVALID_RESPONSE;
         }
 
         return ESP_OK;
@@ -179,21 +180,22 @@ namespace file {
 
         if (fseek(handle, 0, SEEK_SET) != 0) {
             ESP_LOGE(TAG, "Failed to seek to beginning of %s: %s", path, strerror(errno));
-            return ESP_FAIL;
+            return ESP_ERR_INVALID_RESPONSE;
         }
 
-        const size_t bytes_read = fread(buf.data(), 1, buf.size(), handle);
-        if (bytes_read != buf.size()) {
+        if (const size_t bytes_read = fread(buf.data(), 1, buf.size(), handle); bytes_read != buf.size()) {
             if (ferror(handle)) {
                 ESP_LOGE(TAG, "Failed to read %s: %s", path, strerror(errno));
                 clearerr(handle);
-                return ESP_FAIL;
+                return ESP_ERR_INVALID_RESPONSE;
             }
             if (feof(handle)) {
                 ESP_LOGE(TAG, "EOF reached prematurely on %s (read %zu of %zu bytes)", path, bytes_read, buf.size());
                 clearerr(handle);
                 return ESP_ERR_INVALID_SIZE;
             }
+            // Should not reach here
+            return ESP_ERR_INVALID_RESPONSE;
         }
 
         return ESP_OK;

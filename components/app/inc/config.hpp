@@ -18,7 +18,6 @@ namespace config {
 
     constexpr inline gpio_num_t LCD_SDA_PIN = GPIO_NUM_1;
     constexpr inline gpio_num_t LCD_SCL_PIN = GPIO_NUM_2;
-    constexpr inline gpio_num_t LCD_LED_PIN = GPIO_NUM_3;
 
     constexpr inline uint32_t LCD_COLUMNS = 16;
     constexpr inline uint32_t LCD_ROWS    = 2;
@@ -32,7 +31,7 @@ namespace config {
 
     // Keypad matrix pins (4x4)
     constexpr inline std::array<gpio_num_t, 4> KEYPAD_ROW_PINS = {{
-        GPIO_NUM_4, // Row 0
+        GPIO_NUM_6, // Row 0
         GPIO_NUM_5, // Row 1
         GPIO_NUM_6, // Row 2
         GPIO_NUM_7, // Row 3

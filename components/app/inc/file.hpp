@@ -14,13 +14,13 @@ namespace file {
         PNUMBERS,
     };
 
-    [[nodiscard]] bool is_first_boot();
-
     void create();
 
     void open();
 
     void close();
+
+    [[nodiscard]] bool is_first_boot();
 
     [[nodiscard]] esp_err_t write(name_t file, std::span<const uint8_t> buf);
 
