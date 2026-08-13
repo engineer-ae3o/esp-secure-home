@@ -1,4 +1,5 @@
-idf_component_register(SRCS "src/tasks.cpp"
+idf_component_register(SRCS "src/file.cpp"
+                            "src/tasks.cpp"
                             "src/display.cpp"
                             "src/sim800l.cpp"
                             "src/secure_system.cpp"

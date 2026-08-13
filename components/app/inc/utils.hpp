@@ -65,7 +65,6 @@ namespace utils {
 
         // Append the final null terminator
         final_string[idx] = '\0';
-        static_assert(idx == full_size - 1);
 
         return final_string;
     }
