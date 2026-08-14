@@ -20,7 +20,9 @@
 #include "esp_littlefs.h"
 
 #include <cstdint>
+#include <string_view>
 #include <utility>
+#include <optional>
 
 
 namespace tasks {
@@ -106,7 +108,6 @@ namespace tasks {
             TRY_WITH_FUNC_VOID(display::init(), utils::fatal());
             TRY_WITH_FUNC_VOID(display::clear_screen(), utils::fatal());
             TRY_WITH_FUNC_VOID(display::backlight_on(), utils::fatal());
-            TRY_WITH_FUNC_VOID(display::bootup_screen(), utils::fatal());
 
             // Initialize the SIM800L module. The SIM800L requires around 2-3s after power on to fully stablize.
             //TRY_WITH_FUNC_VOID(gsm::init(), utils::fatal());
@@ -115,40 +116,41 @@ namespace tasks {
             ESP_LOGI("Init", "Done initiaizing all components");
         }
 
-        QueueHandle_t g_switch_queue{};
+        // Helpers
+        std::optional<nc::type_t> check_for_switch_break() {
+            uint32_t notification{};
+            xTaskNotifyWait(0, UINT32_MAX, &notification, 0);
 
-        // Tasks
-        [[noreturn]] void switch_task(void* arg) {
-            constexpr const char* TAG = "Switch_Task";
-            ESP_LOGI(TAG, "Switch_Task started");
-
-            using enum nc::type_t;
-
-            // Initialize the reed and tamper switches
-            nc::switch_t<REED> reed;
-            TRY_WITH_FUNC_VOID(reed.init({.pin = config::REED_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
-
-            nc::switch_t<TAMPER> tamper;
-            TRY_WITH_FUNC_VOID(tamper.init({.pin = config::TAMPER_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
-
-            while (true) {
-                uint32_t notification{};
-                xTaskNotifyWait(0, UINT32_MAX, &notification, portMAX_DELAY);
-
-                if (notification & std::to_underlying(REED)) {
-                    ESP_LOGI(TAG, "Reed switch broken");
-                    constexpr auto reed_event = REED;
-                    xQueueSend(g_switch_queue, &reed_event, portMAX_DELAY);
-                }
-
-                if (notification & std::to_underlying(TAMPER)) {
-                    ESP_LOGI(TAG, "Tamper switch broken");
-                    constexpr auto tamper_event = TAMPER;
-                    xQueueSend(g_switch_queue, &tamper_event, portMAX_DELAY);
-                }
+            if (notification & std::to_underlying(nc::type_t::REED)) {
+                return nc::type_t::REED;
             }
+
+            if (notification & std::to_underlying(nc::type_t::TAMPER)) {
+                return nc::type_t::TAMPER;
+            }
+
+            return std::nullopt;
         }
 
+        //
+        struct display_message_t {
+            std::string_view top_message;
+            std::string_view bottom_message;
+            uint32_t         delay_ms{};
+        };
+
+        enum class display_event_t : uint8_t {
+            BOOTUP,
+            PSWD_REQ,
+            TAMPER_SWITCH_BROKEN_ADMIN,
+            REED_SWITCH_BROKEN_ADMIN,
+            TAMPER_SWITCH_BROKEN_NO_ADMIN,
+            REED_SWITCH_BROKEN_NO_ADMIN,
+        };
+
+        QueueHandle_t display_event_queue{};
+
+        // Tasks
         [[noreturn]] void system_task(void* arg) {
             constexpr const char* TAG = "System_task";
             ESP_LOGI(TAG, "System_task started");
@@ -157,20 +159,32 @@ namespace tasks {
             pad::keypad_t<> keypad;
             TRY_WITH_FUNC_VOID(keypad.init({.row_pins = config::KEYPAD_ROW_PINS, .col_pins = config::KEYPAD_COLUMN_PINS}), utils::fatal());
 
+            // Initialize the reed and tamper switches. The keypad initializes the gpio isr service
+            // which these two depend on, hence why it's initialized first.
+            nc::switch_t<nc::type_t::REED> reed;
+            TRY_WITH_FUNC_VOID(reed.init({.pin = config::REED_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
+
+            nc::switch_t<nc::type_t::TAMPER> tamper;
+            TRY_WITH_FUNC_VOID(tamper.init({.pin = config::TAMPER_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
+
             // get_event_queue() only fails if called when not initialized. Safe to extract the value directly
             auto* keypad_event_queue = keypad.get_event_queue().value();
             char  recv_key{};
 
-            nc::type_t switch_event{};
-
+            // Start off with at the lowest privilege level
             bool admin_mode = false;
+
+            // Bootup screen, and request for the password to enter admin mode
+            TRY_WITH_FUNC_VOID(display::bootup_screen(), utils::fatal());
+            TRY_THEN_LOG(display::clear_screen(), "Failed to clear display screen");
+            sys::println("Enter password:", 0);
 
             while (true) {
                 // Check if any switch has been broken
-                auto ret = xQueueReceive(g_switch_queue, &switch_event, 0);
-                if (ret == pdPASS) {
+                auto switch_event = check_for_switch_break();
+                if (switch_event) {
                     // A switch has been broken. Behaviour depends on whether we're in admin mode or not
-                    switch (switch_event) {
+                    switch (switch_event.value()) {
                         case nc::type_t::REED:
                             sys::reed_switch_broken(admin_mode);
                             break;
@@ -185,14 +199,21 @@ namespace tasks {
                     }
                 }
 
-                // Check for any keypress event
-                ret = xQueueReceive(keypad_event_queue, &recv_key, 0);
+                // Check for any key press event
+                auto ret = xQueueReceive(keypad_event_queue, &recv_key, 0);
                 if (ret == pdPASS) {
                     ESP_LOGI(TAG, "Key pressed: %c", recv_key);
                 }
 
-                ESP_LOGI(TAG, "Looping");
                 vTaskDelay(pdMS_TO_TICKS(100));
+            }
+        }
+
+        [[noreturn]] void display_task(void* arg) {
+            constexpr const char* TAG = "System_task";
+            ESP_LOGI(TAG, "System_task started");
+
+            while (true) {
             }
         }
 
@@ -204,13 +225,6 @@ namespace tasks {
 
         constexpr const char* TAG = "Tasks";
 
-        // Create the queue in which to pass all switch broken events to
-        g_switch_queue = xQueueCreate(std::to_underlying(nc::type_t::COUNT), sizeof(nc::type_t));
-        if (g_switch_queue == nullptr) {
-            ESP_LOGE(TAG, "Failed to create the switch queue");
-            utils::fatal();
-        }
-
         // Create the tasks
         BaseType_t ret = xTaskCreate(system_task, "system_task", config::SYSTEM_TASK_STACK, nullptr, config::SYSTEM_TASK_PRIORITY, nullptr);
         if (ret != pdPASS) {
@@ -218,9 +232,9 @@ namespace tasks {
             utils::fatal();
         }
 
-        ret = xTaskCreate(switch_task, "switch_task", config::SWITCH_TASK_STACK, nullptr, config::SWITCH_TASK_PRIORITY, nullptr);
+        ret = xTaskCreate(display_task, "display_task", config::DISPlAY_TASK_STACK, nullptr, config::DISPlAY_TASK_PRIORITY, nullptr);
         if (ret != pdPASS) {
-            ESP_LOGE(TAG, "Failed to create the switch task");
+            ESP_LOGE(TAG, "Failed to create the display task");
             utils::fatal();
         }
     }

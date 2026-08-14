@@ -170,7 +170,7 @@ namespace file {
             return ESP_ERR_INVALID_RESPONSE;
         }
 
-        ESP_LOGE(TAG, "Wrote %zu bytes to %s", buf.size_bytes(), path);
+        ESP_LOGI(TAG, "Wrote %zu bytes to %s", buf.size_bytes(), path);
         return ESP_OK;
     }
 

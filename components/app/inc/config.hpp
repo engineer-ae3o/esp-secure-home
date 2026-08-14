@@ -56,10 +56,10 @@ namespace config {
     constexpr inline uint32_t MAX_CONSC_ERRORS = 5;
 
     // Task stack configuration
-    constexpr inline uint32_t SWITCH_TASK_STACK    = 2048;
-    constexpr inline uint32_t SWITCH_TASK_PRIORITY = 12;
+    constexpr inline uint32_t DISPlAY_TASK_STACK    = 8192;
+    constexpr inline uint32_t DISPlAY_TASK_PRIORITY = 12;
 
     constexpr inline uint32_t SYSTEM_TASK_STACK    = 8192;
-    constexpr inline uint32_t SYSTEM_TASK_PRIORITY = 10;
+    constexpr inline uint32_t SYSTEM_TASK_PRIORITY = 14;
 
 } // namespace config
