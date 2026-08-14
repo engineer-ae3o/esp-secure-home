@@ -155,7 +155,7 @@ namespace file {
             return ESP_ERR_INVALID_RESPONSE;
         }
 
-        if (fwrite(buf.data(), 1, buf.size(), handle) != buf.size()) {
+        if (fwrite(buf.data(), 1, buf.size_bytes(), handle) != buf.size_bytes()) {
             ESP_LOGE(TAG, "Failed to write buffer to %s: %s", path, strerror(errno));
             return ESP_ERR_INVALID_RESPONSE;
         }
@@ -165,6 +165,12 @@ namespace file {
             return ESP_ERR_INVALID_RESPONSE;
         }
 
+        if (fsync(fileno(handle)) != 0) {
+            ESP_LOGE(TAG, "Failed to sync to flash %s: %s", path, strerror(errno));
+            return ESP_ERR_INVALID_RESPONSE;
+        }
+
+        ESP_LOGE(TAG, "Wrote %zu bytes to %s", buf.size_bytes(), path);
         return ESP_OK;
     }
 

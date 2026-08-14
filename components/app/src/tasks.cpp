@@ -33,7 +33,7 @@ namespace tasks {
             TRY_THEN_LOG(storage::deinit(), "Failed to deinitialize the storage interface");
             TRY_THEN_LOG(display::shutdown_screen(), "Failed to display the power down screen");
             TRY_THEN_LOG(display::deinit(), "Failed to deinitialize the display");
-            TRY_THEN_LOG(esp_vfs_littlefs_unregister(static_cast<const char*>(config::FILESYSTEM_BASE_PATH)), "Failed to unmount filesystem");
+            TRY_THEN_LOG(esp_vfs_littlefs_unregister(static_cast<const char*>(config::FILESYSTEM_PARTITION_LABEL)), "Failed to unmount filesystem");
             ESP_LOGI("Info", "Resources cleaned up");
         }
 
@@ -109,8 +109,8 @@ namespace tasks {
             TRY_WITH_FUNC_VOID(display::bootup_screen(), utils::fatal());
 
             // Initialize the SIM800L module. The SIM800L requires around 2-3s after power on to fully stablize.
-            TRY_WITH_FUNC_VOID(gsm::init(), utils::fatal());
-            TRY_THEN_LOG(gsm::get_sim_status(), "SIM card not ready"); // Not a fatal error. We'll retry later on.
+            //TRY_WITH_FUNC_VOID(gsm::init(), utils::fatal());
+            //TRY_THEN_LOG(gsm::get_sim_status(), "SIM card not ready"); // Not a fatal error. We'll retry later on.
 
             ESP_LOGI("Init", "Done initiaizing all components");
         }
@@ -163,15 +163,13 @@ namespace tasks {
 
             nc::type_t switch_event{};
 
-            bool admin_mode    = false;
-            bool switch_broken = false;
+            bool admin_mode = false;
 
             while (true) {
                 // Check if any switch has been broken
                 auto ret = xQueueReceive(g_switch_queue, &switch_event, 0);
                 if (ret == pdPASS) {
                     // A switch has been broken. Behaviour depends on whether we're in admin mode or not
-                    switch_broken = true;
                     switch (switch_event) {
                         case nc::type_t::REED:
                             sys::reed_switch_broken(admin_mode);
@@ -193,7 +191,7 @@ namespace tasks {
                     ESP_LOGI(TAG, "Key pressed: %c", recv_key);
                 }
 
-
+                ESP_LOGI(TAG, "Looping");
                 vTaskDelay(pdMS_TO_TICKS(100));
             }
         }

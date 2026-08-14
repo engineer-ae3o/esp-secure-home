@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "esp_heap_caps.h"
 #include "sim800l.hpp"
 #include "config.hpp"
 #include "utils.hpp"
@@ -37,13 +38,13 @@ namespace storage {
         bool g_is_initialized = false;
 
         // Storage for the data being stored in the files at runtime
-        [[maybe_unused]] pswd_file_data_t     g_pswd_file_storage{};
-        [[maybe_unused]] pnumbers_file_data_t g_pnumbers_file_storage{};
+        [[maybe_unused]] pswd_file_data_t     g_pswd_storage{};
+        [[maybe_unused]] pnumbers_file_data_t g_pnumbers_storage{};
 
         // Helpers
         void cleanup() {
-            memset(&g_pswd_file_storage, 0, sizeof(g_pswd_file_storage));
-            memset(&g_pnumbers_file_storage, 0, sizeof(g_pnumbers_file_storage));
+            memset(&g_pswd_storage, 0, sizeof(g_pswd_storage));
+            memset(&g_pnumbers_storage, 0, sizeof(g_pnumbers_storage));
             file::close();
             g_is_initialized = false;
         }
@@ -71,8 +72,8 @@ namespace storage {
             };
 
             // Write the data to flash
-            TRY(file::write(file::name_t::PSWD, {reinterpret_cast<const uint8_t*>(&g_pswd_file_storage), sizeof(pswd_file_data)}));
-            TRY(file::write(file::name_t::PNUMBERS, {reinterpret_cast<const uint8_t*>(&g_pnumbers_file_storage), sizeof(pnumbers_file_data)}));
+            TRY(file::write(file::name_t::PSWD, {reinterpret_cast<const uint8_t*>(&g_pswd_storage), sizeof(pswd_file_data)}));
+            TRY(file::write(file::name_t::PNUMBERS, {reinterpret_cast<const uint8_t*>(&g_pnumbers_storage), sizeof(pnumbers_file_data)}));
 
             // Reboot the system once the default password and phone numbers have been written to flash
             utils::reboot();
@@ -80,12 +81,20 @@ namespace storage {
 
         // Since not first boot, open the files and load the data there.
         file::open();
-        TRY(file::read(file::name_t::PSWD, {reinterpret_cast<uint8_t*>(&g_pswd_file_storage), sizeof(g_pswd_file_storage)}));
-        TRY(file::read(file::name_t::PNUMBERS, {reinterpret_cast<uint8_t*>(&g_pnumbers_file_storage), sizeof(g_pnumbers_file_storage)}));
+        TRY(file::read(file::name_t::PSWD, {reinterpret_cast<uint8_t*>(&g_pswd_storage), sizeof(g_pswd_storage)}));
+        TRY(file::read(file::name_t::PNUMBERS, {reinterpret_cast<uint8_t*>(&g_pnumbers_storage), sizeof(g_pnumbers_storage)}));
 
-        ESP_LOGI(TAG, "Current password: ");
-        for (size_t i = 0; i < g_pnumbers_file_storage.num_of_pnumbers; i++) {
-            ESP_LOGI(TAG, "Phone number %zu: ", i);
+        // Get a buffer to store the data temporarily so they can be null terminated and read
+        std::array<char, std::max(PASSWORD_LEN, gsm::PHONE_NUMBER_LEN) + 1> temp{};
+
+        memcpy(temp.data(), &g_pswd_storage.pswd, PASSWORD_LEN);
+        temp.back() = '\0';
+        ESP_LOGI(TAG, "Current password: %s", temp.data());
+
+        for (size_t i = 0; i < g_pnumbers_storage.num_of_pnumbers; i++) {
+            memcpy(temp.data(), &g_pnumbers_storage.pnumbers[i], gsm::PHONE_NUMBER_LEN);
+            temp.back() = '\0';
+            ESP_LOGI(TAG, "Phone number %zu: %s", i, temp.data());
         }
 
         g_is_initialized = true;

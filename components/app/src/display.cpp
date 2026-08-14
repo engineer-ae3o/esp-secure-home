@@ -57,7 +57,7 @@ namespace display {
             .backlight = false,
         };
 
-        constexpr uint32_t POWER_ON_SCREEN_WAIT_MS   = 2000;
+        constexpr uint32_t POWER_ON_SCREEN_WAIT_MS   = 1500;
         constexpr uint32_t POWER_DOWN_SCREEN_WAIT_MS = POWER_ON_SCREEN_WAIT_MS;
 
         void cleanup() {
