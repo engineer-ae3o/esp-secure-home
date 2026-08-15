@@ -22,6 +22,7 @@ namespace {
         REED_SWITCH_BROKEN_ADMIN,
         TAMPER_SWITCH_BROKEN_NO_ADMIN,
         REED_SWITCH_BROKEN_NO_ADMIN,
+        ADMIN_MODE,
         COUNT,
     };
 
@@ -53,7 +54,7 @@ namespace {
     constexpr display_request_t tamper_switch_broken_admin = {
         .return_to_prev = true, // Normal event. Go back to the previous screen when done here
         .screen_type    = screen_t::TAMPER_SWITCH_BROKEN_ADMIN,
-        .duration_ms    = 3000, // 3s should be enough
+        .duration_ms    = 4000, // 4s should be enough
     };
 
     // When the tamper switch is broken but not in admin mode
@@ -67,13 +68,20 @@ namespace {
     constexpr display_request_t reed_switch_broken_admin = {
         .return_to_prev = true, // Normal event. Go back to the previous screen when done here
         .screen_type    = screen_t::REED_SWITCH_BROKEN_ADMIN,
-        .duration_ms    = 3000, // 3s should be enough
+        .duration_ms    = 2000, // 2s should be enough
     };
 
     // When the reed switch is broken but not in admin mode
     constexpr display_request_t reed_switch_broken_no_admin = {
         .return_to_prev = false, // This is a intruder alert. Do not return to the previous screen.
         .screen_type    = screen_t::REED_SWITCH_BROKEN_NO_ADMIN,
+        .duration_ms    = 0,
+    };
+
+    // When the reed switch is broken but not in admin mode
+    constexpr display_request_t admin_screen = {
+        .return_to_prev = false, // This should be held till the user decides to change the screen, or a switch was broken
+        .screen_type    = screen_t::ADMIN_MODE,
         .duration_ms    = 0,
     };
 
@@ -84,26 +92,38 @@ namespace {
     constexpr std::array<screen_message_t, std::to_underlying(screen_t::COUNT)> SCREEN_MAP_LUT = {{
         [std::to_underlying(screen_t::PASSWORD_REQUEST)] =
             {
+                // The default screen after boot. User can enter the password to enter admin mode.
                 "Enter password:",
                 "",
             },
         [std::to_underlying(screen_t::TAMPER_SWITCH_BROKEN_ADMIN)] =
             {
-                "",
-                "",
+                // The tamper switch guards the control box containing the components. Not standard behaviour for
+                // a verified user to open the box. Display a warning to the user, but no need for an SMS.
+                "Please leave the",
+                "  control box  ",
             },
         [std::to_underlying(screen_t::REED_SWITCH_BROKEN_ADMIN)] =
             {
-                "",
-                "",
+                // The reed switch guards the doors. It is standard behaviour for it to be broken in admin mode.
+                "  A door has   ",
+                "  been opened  ",
             },
         [std::to_underlying(screen_t::TAMPER_SWITCH_BROKEN_NO_ADMIN)] =
             {
-                "",
-                "",
+                // Intruder alert if any switch has been broken while not in admin mode
+                "Intruder detecte",
+                "d in control box",
             },
         [std::to_underlying(screen_t::REED_SWITCH_BROKEN_NO_ADMIN)] =
             {
+                // Intruder alert if any switch has been broken while not in admin mode
+                "An intruder has",
+                "opened a door(s)",
+            },
+        [std::to_underlying(screen_t::ADMIN_MODE)] =
+            {
+                // Admin mode. Show options to view all phone numbers and add or remove a phone number
                 "",
                 "",
             },

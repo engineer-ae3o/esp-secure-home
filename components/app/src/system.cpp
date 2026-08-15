@@ -42,12 +42,12 @@ namespace sys {
     } // namespace
 
     void println(std::string_view msg, uint8_t line) {
+        // Track consecutive failures
         static uint32_t consc_err_counter = 0;
 
         auto ret = display::println(msg, line);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to send message to the display. Perharps it is disconnected?: %s", esp_err_to_name(ret));
-            // Track consecutive failures
             consc_err_counter++;
             if (consc_err_counter >= config::MAX_CONSC_ERRORS) {
                 ESP_LOGE(TAG, "Too many LCD write failures (%u consecutive failures). Rebooting system", consc_err_counter);
@@ -58,45 +58,26 @@ namespace sys {
         }
     }
 
-    void reed_switch_broken(bool is_admin_mode) {
+    void on_reed_switch_break(bool is_admin_mode) {
         if (is_admin_mode) {
-            // The reed switch guards the doors. It is standard behaviour for it to be broken in admin mode.
-            println("  A door has   ", 0);
-            println("  been opened  ", 1);
-
+            // Just log in admin mode since this is not a security breach
             ESP_LOGI(TAG, "Door opened in admin mode");
         } else {
-            // Intruder alert if any switch has been broken while not in admin mode
-            println("An intruder has", 0);
-            println("opened a door(s)", 1);
-
-            ESP_LOGW(TAG, "An intruder has opened a door(s)");
-
-            // Send the SMS to all registered phone numbers
-            send_sms("An unknown person has opened one or more doors. Take safety measures accordingly.");
+            // Send the SMS to all phone numbers
+            ESP_LOGW(TAG, "An intruder has opened a door");
+            ESP_LOGW(TAG, "Sending an SMS to all registered phone numbers");
+            send_sms("An unknown person has opened a door. Take safety measures accordingly.");
         }
     }
 
-    void tamper_switch_broken(bool is_admin_mode) {
+    void on_tamper_switch_break(bool is_admin_mode) {
         if (is_admin_mode) {
-            // The tamper switch guards the control box containing the components. Not standard behaviour for
-            // a verified user to open the box. Display a warning to the user, but no need for an SMS.
-            println("The control box", 0);
-            println("  is not to be  ", 1);
-
-            ESP_LOGW(TAG, "The control box should not be opened");
-            vTaskDelay(pdMS_TO_TICKS(DELAY_BETWEEN_PRINTS_MS));
-
-            println(" tampered with. ", 0);
-            println("  Please close. ", 1);
+            // Just log in admin mode since this is not a security breach
+            ESP_LOGW(TAG, "The control box is being tampered with");
         } else {
-            // Intruder alert if any switch has been broken while not in admin mode
-            println("Intruder detecte", 0);
-            println("d in control box", 1);
-
-            ESP_LOGW(TAG, "Intruder detected in control box");
-
-            // Send the SMS to all registered phone numbers
+            // Send the SMS to all phone numbers
+            ESP_LOGW(TAG, "An intruder has gained access to the system control box");
+            ESP_LOGW(TAG, "Sending an SMS to all registered phone numbers");
             send_sms("An unknown person has gained access to the system control box. Take safety measures accordingly.");
         }
     }

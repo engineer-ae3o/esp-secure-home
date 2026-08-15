@@ -198,7 +198,7 @@ namespace tasks {
                     sys::println(SCREEN_MAP_LUT[std::to_underlying(previous_screen)].second, 1);
                 }
 
-                // If return_to_prev_scr is false, there is no reason to block.
+                // If return_to_prev_scr is false, there is no reason to block here.
                 // Instead the screen will be held till the next display request.
             }
         }
@@ -232,19 +232,15 @@ namespace tasks {
                 }
 
                 if (reed_switch_broken) {
-                    if (g_admin_mode) {
-                        xQueueSend(g_display_queue, &reed_switch_broken_admin, portMAX_DELAY);
-                    } else {
-                        xQueueSend(g_display_queue, &reed_switch_broken_no_admin, portMAX_DELAY);
-                    }
+                    const auto& reed_broken_request = g_admin_mode ? reed_switch_broken_admin : reed_switch_broken_no_admin;
+                    xQueueSend(g_display_queue, &reed_broken_request, portMAX_DELAY);
+                    sys::on_reed_switch_break(g_admin_mode);
                 }
 
                 if (tamper_switch_broken) {
-                    if (g_admin_mode) {
-                        xQueueSend(g_display_queue, &tamper_switch_broken_admin, portMAX_DELAY);
-                    } else {
-                        xQueueSend(g_display_queue, &tamper_switch_broken_no_admin, portMAX_DELAY);
-                    }
+                    const auto& tamper_broken_request = g_admin_mode ? tamper_switch_broken_admin : tamper_switch_broken_no_admin;
+                    xQueueSend(g_display_queue, &tamper_broken_request, portMAX_DELAY);
+                    sys::on_tamper_switch_break(g_admin_mode);
                 }
             }
         }
