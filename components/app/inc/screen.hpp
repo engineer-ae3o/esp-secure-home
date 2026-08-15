@@ -1,10 +1,15 @@
+#pragma once
+
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/projdefs.h"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <utility>
 #include <string_view>
+
 
 namespace {
 
@@ -12,7 +17,6 @@ namespace {
 
     // The display screens
     enum class screen_t : uint8_t {
-        BOOTUP_SCREEN,
         PASSWORD_REQUEST,
         TAMPER_SWITCH_BROKEN_ADMIN,
         REED_SWITCH_BROKEN_ADMIN,
@@ -29,22 +33,20 @@ namespace {
     struct display_request_t {
         bool     return_to_prev{};
         screen_t screen_type{};
-        uint32_t duration_ms{};
+        uint16_t duration_ms{};
     };
+
+    // Updated by the display task when it serves any request. Read by the system
+    // task so it knows what to do with key presses at that point in time.
+    std::atomic<screen_t> g_current_screen{};
+    static_assert(g_current_screen.is_always_lock_free); // NOLINT(readability-static-accessed-through-instance)
 
     // Craft ready to use display requests
-    // On bootup
-    constexpr display_request_t bootup = {
-        .return_to_prev = false,
-        .screen_type    = screen_t::BOOTUP_SCREEN,
-        .duration_ms    = portMAX_DELAY,
-    };
-
     // Request for the password to enter admin mode
     constexpr display_request_t password_req = {
         .return_to_prev = false,
         .screen_type    = screen_t::PASSWORD_REQUEST,
-        .duration_ms    = portMAX_DELAY,
+        .duration_ms    = 0,
     };
 
     // When the tamper switch is broken but in admin mode
@@ -58,7 +60,7 @@ namespace {
     constexpr display_request_t tamper_switch_broken_no_admin = {
         .return_to_prev = false, // This is a intruder alert. Do not return to the previous screen.
         .screen_type    = screen_t::TAMPER_SWITCH_BROKEN_NO_ADMIN,
-        .duration_ms    = portMAX_DELAY,
+        .duration_ms    = 0,
     };
 
     // When the reed switch is broken but in admin mode
@@ -72,14 +74,39 @@ namespace {
     constexpr display_request_t reed_switch_broken_no_admin = {
         .return_to_prev = false, // This is a intruder alert. Do not return to the previous screen.
         .screen_type    = screen_t::REED_SWITCH_BROKEN_NO_ADMIN,
-        .duration_ms    = portMAX_DELAY,
+        .duration_ms    = 0,
     };
 
     // Type representing the messages to be displayed
     using screen_message_t = std::pair<std::string_view, std::string_view>;
 
     // LUT mapping the screen types to the message it is to display
-    constexpr std::array<screen_message_t, std::to_underlying(screen_t::COUNT)> SCREEN_MAP_LUT = {{}};
-
+    constexpr std::array<screen_message_t, std::to_underlying(screen_t::COUNT)> SCREEN_MAP_LUT = {{
+        [std::to_underlying(screen_t::PASSWORD_REQUEST)] =
+            {
+                "Enter password:",
+                "",
+            },
+        [std::to_underlying(screen_t::TAMPER_SWITCH_BROKEN_ADMIN)] =
+            {
+                "",
+                "",
+            },
+        [std::to_underlying(screen_t::REED_SWITCH_BROKEN_ADMIN)] =
+            {
+                "",
+                "",
+            },
+        [std::to_underlying(screen_t::TAMPER_SWITCH_BROKEN_NO_ADMIN)] =
+            {
+                "",
+                "",
+            },
+        [std::to_underlying(screen_t::REED_SWITCH_BROKEN_NO_ADMIN)] =
+            {
+                "",
+                "",
+            },
+    }};
 
 } // namespace

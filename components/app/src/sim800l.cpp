@@ -108,7 +108,7 @@ namespace gsm {
 
         bool synced = false;
 
-        for (uint32_t i = 0; i < MAX_RETRIES; ++i) {
+        for (uint32_t i = 0; i < MAX_RETRIES; i++) {
             if (esp_modem_sync(g_dce_handle) == ESP_OK) {
                 synced = true;
                 break;
@@ -138,8 +138,8 @@ namespace gsm {
             return ret;
         }
 
-        ESP_LOGI(TAG, "IMSI of the SIM Card: %.*s", imsi.data());
-        ESP_LOGI(TAG, "IMEI of the SIM800L: %.*s", imei.data());
+        ESP_LOGI(TAG, "IMSI of the SIM Card: %.*s", imsi.size(), imsi.data());
+        ESP_LOGI(TAG, "IMEI of the SIM800L: %.*s", imei.size(), imei.data());
 
         g_gsm_mutex = xSemaphoreCreateMutexStatic(&g_gsm_mutex_stack);
 

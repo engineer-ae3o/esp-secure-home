@@ -58,12 +58,15 @@ namespace config {
 
     // Task stack configuration
     constexpr inline uint32_t DISPlAY_TASK_STACK    = 8 * 1024;
-    constexpr inline uint32_t DISPlAY_TASK_PRIORITY = 12;
+    constexpr inline uint32_t DISPlAY_TASK_PRIORITY = 9;
+
+    constexpr inline uint32_t SWITCH_TASK_STACK    = 6 * 1024;
+    constexpr inline uint32_t SWITCH_TASK_PRIORITY = 11;
 
     constexpr inline uint32_t SYSTEM_TASK_STACK    = 8 * 1024;
-    constexpr inline uint32_t SYSTEM_TASK_PRIORITY = 14;
+    constexpr inline uint32_t SYSTEM_TASK_PRIORITY = 12;
 
     constexpr inline uint32_t GSM_INIT_TASK_STACK    = 6 * 1024;
-    constexpr inline uint32_t GSM_INIT_TASK_PRIORITY = 16;
+    constexpr inline uint32_t GSM_INIT_TASK_PRIORITY = 10;
 
 } // namespace config

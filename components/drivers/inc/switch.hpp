@@ -16,6 +16,7 @@
 namespace nc {
 
     enum class type_t : uint8_t {
+        NONE   = 0,
         REED   = 1U << 3, // Arbitrary bit position
         TAMPER = 1U << 5, // Arbitrary bit position
         COUNT  = 2,       // Keep rack of the number of supported switch types

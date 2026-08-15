@@ -14,12 +14,12 @@
 #include "sim800l.hpp"
 #include "storage.hpp"
 
-#include "esp_err.h"
 #include "esp_log.h"
 #include "portmacro.h"
 #include "esp_system.h"
 #include "esp_littlefs.h"
 
+#include <atomic>
 #include <cstdint>
 #include <utility>
 #include <optional>
@@ -30,29 +30,19 @@ namespace tasks {
 
     namespace {
 
-        // Helpers
-        std::optional<nc::type_t> check_for_switch_break() {
-            uint32_t notification{};
-            xTaskNotifyWait(0, UINT32_MAX, &notification, 0);
-
-            if (notification & std::to_underlying(nc::type_t::REED)) {
-                return nc::type_t::REED;
-            }
-
-            if (notification & std::to_underlying(nc::type_t::TAMPER)) {
-                return nc::type_t::TAMPER;
-            }
-
-            return std::nullopt;
-        }
-
+        // Thedisplay queue to which display requests are passed into
         QueueHandle_t g_display_queue{};
 
+        // Start off with at the lowest privilege level
+        std::atomic<bool> g_admin_mode = false;
+
+        // Helpers
         void deinit_all() {
             ESP_LOGI("Info", "Deinitializing the system. Cleaning resources");
 
             TRY_THEN_LOG(gsm::deinit(), "Failed to deinitialize the SIM800L module");
             TRY_THEN_LOG(storage::deinit(), "Failed to deinitialize the storage interface");
+            TRY_THEN_LOG(gpio_uninstall_isr_service(), "Failed to uninstall the gpio isr service");
 
             // We use the shutdown screen here directly. This is safe as no other thread is actively using or driving it
             TRY_THEN_LOG(display::shutdown_screen(), "Failed to display the power down screen");
@@ -138,6 +128,9 @@ namespace tasks {
             // Register a shutdown handler to get called before any reboot
             TRY_WITH_FUNC_VOID(esp_register_shutdown_handler(deinit_all), utils::fatal());
 
+            // Initialize the gpio isr service
+            TRY_WITH_FUNC_VOID(gpio_install_isr_service(ESP_INTR_FLAG_LEVEL1), utils::fatal());
+
             // Create the display queue with a size of 16 elements to hold as many display requests as possible
             g_display_queue = xQueueCreate(16, sizeof(display_request_t));
             if (g_display_queue == nullptr) {
@@ -154,57 +147,17 @@ namespace tasks {
             ESP_LOGI(TAG, "System_task started");
 
             // Initialize the keypad
-            pad::keypad_t<> keypad;
+            pad::keypad_t<false> keypad;
             TRY_WITH_FUNC_VOID(keypad.init({.row_pins = config::KEYPAD_ROW_PINS, .col_pins = config::KEYPAD_COLUMN_PINS}), utils::fatal());
-
-            // Initialize the reed and tamper switches. The keypad initializes the gpio isr service
-            // which these two depend on, hence why it's initialized first.
-            nc::switch_t<nc::type_t::REED> reed;
-            TRY_WITH_FUNC_VOID(reed.init({.pin = config::REED_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
-
-            nc::switch_t<nc::type_t::TAMPER> tamper;
-            TRY_WITH_FUNC_VOID(tamper.init({.pin = config::TAMPER_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
 
             // get_event_queue() only fails if called when not initialized. Safe to extract the value directly
             auto* keypad_event_queue = keypad.get_event_queue().value();
             char  recv_key{};
 
-            // Start off with at the lowest privilege level
-            bool admin_mode = false;
-
-            // Push the bootup screen request, and password request screens to the display queue
-            xQueueSend(g_display_queue, &bootup, portMAX_DELAY);
+            // Push the password request screens to the display queue
             xQueueSend(g_display_queue, &password_req, portMAX_DELAY);
 
             while (true) {
-                // Check if any switch has been broken
-                auto switch_event = check_for_switch_break();
-                if (switch_event) {
-                    // A switch has been broken. Behaviour depends on whether we're in admin mode or not
-                    switch (switch_event.value()) {
-                        case nc::type_t::REED:
-                            if (admin_mode) {
-                                xQueueSend(g_display_queue, &reed_switch_broken_admin, portMAX_DELAY);
-                            } else {
-                                xQueueSend(g_display_queue, &reed_switch_broken_no_admin, portMAX_DELAY);
-                            }
-                            break;
-
-                        case nc::type_t::TAMPER:
-                            if (admin_mode) {
-                                xQueueSend(g_display_queue, &tamper_switch_broken_admin, portMAX_DELAY);
-                            } else {
-                                xQueueSend(g_display_queue, &tamper_switch_broken_no_admin, portMAX_DELAY);
-                            }
-                            break;
-
-                        default:
-                            ESP_LOGW(TAG, "Invalid switch event");
-                            break;
-                    }
-                }
-
-                // Check for any key press event
                 auto ret = xQueueReceive(keypad_event_queue, &recv_key, 0);
                 if (ret == pdPASS) {
                     ESP_LOGI(TAG, "Key pressed: %c", recv_key);
@@ -218,8 +171,81 @@ namespace tasks {
             constexpr const char* TAG = "Display_task";
             ESP_LOGI(TAG, "Display_task started");
 
+            TRY_WITH_FUNC_VOID(display::bootup_screen(), utils::fatal());
+
+            display_request_t request = {};
+
             while (true) {
-                vTaskDelay(pdMS_TO_TICKS(portMAX_DELAY));
+                // Block till a request is received
+                xQueueReceive(g_display_queue, &request, portMAX_DELAY);
+                const auto& [return_to_prev_scr, screen_type, duration_ms] = request;
+
+                // Keep track of the current screen before it is changed
+                const auto previous_screen = g_current_screen.load(std::memory_order_seq_cst);
+
+                // Update the global current screen variable and switch to the requested screen
+                g_current_screen = screen_type;
+                sys::println(SCREEN_MAP_LUT[std::to_underlying(screen_type)].first, 0);
+                sys::println(SCREEN_MAP_LUT[std::to_underlying(screen_type)].second, 1);
+
+                if (return_to_prev_scr) {
+                    // Hold the current screen for the requested amount of time
+                    vTaskDelay(pdMS_TO_TICKS(duration_ms));
+
+                    // Update the global current screen variable and switch back to the previous screen
+                    g_current_screen = previous_screen;
+                    sys::println(SCREEN_MAP_LUT[std::to_underlying(previous_screen)].first, 0);
+                    sys::println(SCREEN_MAP_LUT[std::to_underlying(previous_screen)].second, 1);
+                }
+
+                // If return_to_prev_scr is false, there is no reason to block.
+                // Instead the screen will be held till the next display request.
+            }
+        }
+
+        [[noreturn]] void switch_task(void* arg) {
+            constexpr const char* TAG = "Switch_task";
+            ESP_LOGI(TAG, "Switch_task started");
+
+            // Initialize the reed and tamper switches.
+            nc::switch_t<nc::type_t::REED, false> reed;
+            TRY_WITH_FUNC_VOID(reed.init({.pin = config::REED_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
+
+            nc::switch_t<nc::type_t::TAMPER, false> tamper;
+            TRY_WITH_FUNC_VOID(tamper.init({.pin = config::TAMPER_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
+
+            while (true) {
+                uint32_t notification{};
+
+                bool reed_switch_broken   = false;
+                bool tamper_switch_broken = false;
+
+                // Block till a switch break
+                xTaskNotifyWait(0, UINT32_MAX, &notification, portMAX_DELAY);
+
+                if (notification & std::to_underlying(nc::type_t::REED)) {
+                    reed_switch_broken = true;
+                }
+
+                if (notification & std::to_underlying(nc::type_t::TAMPER)) {
+                    tamper_switch_broken = true;
+                }
+
+                if (reed_switch_broken) {
+                    if (g_admin_mode) {
+                        xQueueSend(g_display_queue, &reed_switch_broken_admin, portMAX_DELAY);
+                    } else {
+                        xQueueSend(g_display_queue, &reed_switch_broken_no_admin, portMAX_DELAY);
+                    }
+                }
+
+                if (tamper_switch_broken) {
+                    if (g_admin_mode) {
+                        xQueueSend(g_display_queue, &tamper_switch_broken_admin, portMAX_DELAY);
+                    } else {
+                        xQueueSend(g_display_queue, &tamper_switch_broken_no_admin, portMAX_DELAY);
+                    }
+                }
             }
         }
 
@@ -241,6 +267,12 @@ namespace tasks {
         ret = xTaskCreate(display_task, "display_task", config::DISPlAY_TASK_STACK, nullptr, config::DISPlAY_TASK_PRIORITY, nullptr);
         if (ret != pdPASS) {
             ESP_LOGE(TAG, "Failed to create the display task");
+            utils::fatal();
+        }
+
+        ret = xTaskCreate(switch_task, "switch_task", config::SWITCH_TASK_STACK, nullptr, config::SWITCH_TASK_PRIORITY, nullptr);
+        if (ret != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create the switch task");
             utils::fatal();
         }
 
