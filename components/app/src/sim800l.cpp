@@ -1,8 +1,3 @@
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
-#include "freertos/task.h"
-#include "portmacro.h"
-
 #include "sim800l.hpp"
 #include "config.hpp"
 #include "utils.hpp"
@@ -33,26 +28,6 @@ namespace gsm {
         esp_modem_dce_t* g_dce_handle{};
         esp_netif_t*     g_esp_netif{};
 
-        SemaphoreHandle_t g_gsm_mutex{};
-        StaticSemaphore_t g_gsm_mutex_stack{};
-
-        // RAII helper for taking and freeing the mutex
-        struct scoped_mutex_t {
-        public:
-            scoped_mutex_t() {
-                xSemaphoreTake(g_gsm_mutex, pdMS_TO_TICKS(portMAX_DELAY));
-            }
-
-            ~scoped_mutex_t() {
-                xSemaphoreGive(g_gsm_mutex);
-            }
-
-            scoped_mutex_t(const scoped_mutex_t&)            = delete;
-            scoped_mutex_t& operator=(const scoped_mutex_t&) = delete;
-            scoped_mutex_t(scoped_mutex_t&&)                 = delete;
-            scoped_mutex_t& operator=(scoped_mutex_t&&)      = delete;
-        };
-
         void cleanup() {
             if (g_dce_handle) {
                 esp_modem_destroy(g_dce_handle);
@@ -63,7 +38,7 @@ namespace gsm {
                 g_esp_netif = nullptr;
             }
             TRY_THEN_LOG(esp_event_loop_delete_default(), "Failed to remove the system event loop");
-            // TRY_THEN_LOG(esp_netif_deinit(),""); // Not supported yet
+            // TRY_THEN_LOG(esp_netif_deinit(),""); // Not supported yet by ESP-IDF
             g_is_initialized = false;
         }
 
@@ -103,6 +78,8 @@ namespace gsm {
             return ESP_ERR_NO_MEM;
         }
 
+        // Not needed at the moment
+#if 0   // NOLINT(readability-avoid-unconditional-preprocessor-if)
         // Sync retry loop before reading IMSI
         constexpr uint32_t MAX_RETRIES = 5;
 
@@ -121,6 +98,7 @@ namespace gsm {
             cleanup();
             return ESP_ERR_TIMEOUT;
         }
+#endif
 
         // Read the IMSI
         std::array<char, CONFIG_ESP_MODEM_C_API_STR_MAX> imsi{};
@@ -141,35 +119,20 @@ namespace gsm {
         ESP_LOGI(TAG, "IMSI of the SIM Card: %.*s", imsi.size(), imsi.data());
         ESP_LOGI(TAG, "IMEI of the SIM800L: %.*s", imei.size(), imei.data());
 
-        g_gsm_mutex = xSemaphoreCreateMutexStatic(&g_gsm_mutex_stack);
-
         g_is_initialized = true;
         return ESP_OK;
     }
 
     esp_err_t deinit() {
-        // Take the mutex to ensure the cleanup is thread safe and no other thread holds the mutex as it is about to be deleted
-        {
-            [[maybe_unused]] scoped_mutex_t scoped_mutex;
-            if (!g_is_initialized) {
-                return ESP_ERR_INVALID_STATE;
-            }
-            cleanup();
+        if (!g_is_initialized) {
+            return ESP_ERR_INVALID_STATE;
         }
 
-        // Delete the mutex only after cleaning other resources
-        if (g_gsm_mutex) {
-            vSemaphoreDelete(g_gsm_mutex);
-            g_gsm_mutex_stack = {};
-            g_gsm_mutex       = nullptr;
-        }
-
+        cleanup();
         return ESP_OK;
     }
 
     esp_err_t get_sim_status() {
-        [[maybe_unused]] scoped_mutex_t scoped_mutex;
-
         if (!g_is_initialized) {
             return ESP_ERR_INVALID_STATE;
         }
@@ -191,8 +154,6 @@ namespace gsm {
     }
 
     esp_err_t send_sms(std::string_view sms, std::string_view pnumber) {
-        [[maybe_unused]] scoped_mutex_t scoped_mutex;
-
         if (!g_is_initialized) {
             return ESP_ERR_INVALID_STATE;
         }

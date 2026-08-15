@@ -19,10 +19,12 @@
 #include "esp_system.h"
 #include "esp_littlefs.h"
 
+#include <array>
 #include <atomic>
+#include <cstdio>
 #include <cstdint>
 #include <utility>
-#include <optional>
+#include <algorithm>
 #include <string_view>
 
 
@@ -30,11 +32,11 @@ namespace tasks {
 
     namespace {
 
-        // Thedisplay queue to which display requests are passed into
-        QueueHandle_t g_display_queue{};
-
         // Start off with at the lowest privilege level
         std::atomic<bool> g_admin_mode = false;
+
+        // The display queue to which display requests are passed into
+        QueueHandle_t g_display_queue{};
 
         // Helpers
         void deinit_all() {
@@ -141,7 +143,77 @@ namespace tasks {
             ESP_LOGI("Init", "Done initializing all components");
         }
 
-        // Tasks
+        // ---------------------------------------------------------------------------
+        // Keypad UI / admin mode state machine
+        //
+        // Keypad layout is a standard 4x4 (digits 0-9, A-D, *, #). Since there's no
+        // way to type symbols like '+', A-D/*/# are reserved as control keys and only
+        // digits are ever accepted as data (passwords and phone numbers are digits-only
+        // as far as user entry is concerned):
+        //
+        //   A       - OK / confirm / select
+        //   B       - backspace (delete last typed digit)
+        //   C       - scroll up / previous item
+        //   D       - scroll down / next item
+        //   *       - cancel current entry / go back one level
+        //   #       - logout: return to the password prompt from anywhere in admin mode
+        // ---------------------------------------------------------------------------
+
+        enum class ui_state_t : uint8_t {
+            AWAITING_PASSWORD, // Default/locked state. User is typing the admin password.
+            LOCKED_OUT,        // Too many failed attempts. Ignoring input until the lockout expires.
+            ADMIN_MENU,        // Top level admin menu.
+            VIEW_NUMBERS,      // Scrolling through the registered phone numbers (read only).
+            ADD_NUMBER,        // Typing a new phone number to register.
+            RM_NUMBER,         // Scrolling through registered numbers to pick one to remove.
+            CHANGE_PW_NEW,     // Typing the new password.
+            CHANGE_PW_CONFIRM, // Re-typing the new password to confirm it.
+        };
+
+        constexpr std::array<std::string_view, 4> ADMIN_MENU_ITEMS = {
+            "View numbers",
+            "Add number",
+            "Remove number",
+            "Change password",
+        };
+
+        constexpr size_t COUNTRY_CODE_LEN = sizeof(config::COUNTRY_PNUMBER_CODE) - 1; // Leave out the null terminator
+        constexpr size_t PHONE_DIGITS_LEN = gsm::PHONE_NUMBER_LEN - COUNTRY_CODE_LEN; // Digits the user actually types
+
+        // Sends a request to the display queue, blocking until there's room for it.
+        void ui_send(const display_request_t& request) {
+            xQueueSend(g_display_queue, &request, portMAX_DELAY);
+        }
+
+        // Shows a transient feedback message (e.g. "Wrong password", "Number added") for
+        // config::UI_MESSAGE_DURATION_MS, after which the display reverts to whatever is
+        // sent next automatically re-renders it - this itself does not block the caller.
+        void ui_send_feedback(std::string_view line0, std::string_view line1 = "") {
+            ui_send(make_custom_request(line0, line1, true, config::UI_MESSAGE_DURATION_MS));
+        }
+
+        // Renders the password entry screen, masking typed digits as asterisks.
+        void ui_render_password_prompt(std::string_view input) {
+            std::array<char, storage::PASSWORD_LEN> mask{};
+            mask.fill('*');
+            ui_send(make_custom_request("Enter password:", {mask.data(), input.size()}));
+        }
+
+        void ui_render_menu(size_t menu_idx) {
+            ui_send(make_custom_request("-- Admin Menu --", ADMIN_MENU_ITEMS[menu_idx]));
+        }
+
+        // Renders "<label> (i/n)" on line0 and the phone number itself on line1. Used by
+        // both the view and remove number flows.
+        void ui_render_number(std::string_view label, size_t idx, size_t count, std::string_view pnumber) {
+            std::array<char, config::LCD_COLUMNS> header{};
+
+            const int written =
+                snprintf(header.data(), header.size(), "%.*s (%zu/%zu)", static_cast<int>(label.size()), label.data(), idx + 1, count);
+            const size_t header_len = std::min(header.size(), static_cast<size_t>(std::max(written, 0)));
+            ui_send(make_custom_request({header.data(), header_len}, pnumber));
+        }
+
         [[noreturn]] void system_task(void* arg) {
             constexpr const char* TAG = "System_task";
             ESP_LOGI(TAG, "System_task started");
@@ -154,16 +226,400 @@ namespace tasks {
             auto* keypad_event_queue = keypad.get_event_queue().value();
             char  recv_key{};
 
-            // Push the password request screens to the display queue
-            xQueueSend(g_display_queue, &password_req, portMAX_DELAY);
+            ui_state_t state = ui_state_t::AWAITING_PASSWORD;
+
+            // Digit entry buffer, sized for the largest thing ever typed into it (a phone number).
+            std::array<char, PHONE_DIGITS_LEN> input_buf{};
+            size_t                             input_len = 0;
+
+            // Holds the first entry of a new password while the user is asked to confirm it.
+            std::array<char, storage::PASSWORD_LEN> pw_pending{};
+
+            size_t   menu_idx        = 0; // Selected item in the admin menu
+            size_t   list_idx        = 0; // Selected item while viewing/removing phone numbers
+            uint32_t failed_attempts = 0; // Consecutive failed password attempts (brute force protection)
+
+            TickType_t lockout_until_tick = 0;
+            TickType_t last_activity_tick = xTaskGetTickCount();
+
+            // Push the password request screen to the display queue
+            ui_send(password_req);
 
             while (true) {
                 auto ret = xQueueReceive(keypad_event_queue, &recv_key, 0);
-                if (ret == pdPASS) {
-                    ESP_LOGI(TAG, "Key pressed: %c", recv_key);
+
+                // Handle lockout expiry / admin idle timeout even when no key was pressed
+                if (ret != pdPASS) {
+                    const auto now = xTaskGetTickCount();
+
+                    if (state == ui_state_t::LOCKED_OUT && now >= lockout_until_tick) {
+                        ESP_LOGI(TAG, "Lockout period over. Accepting password attempts again");
+                        failed_attempts = 0;
+                        state           = ui_state_t::AWAITING_PASSWORD;
+                        input_len       = 0;
+                        ui_render_password_prompt({});
+                    } else if (state != ui_state_t::AWAITING_PASSWORD && state != ui_state_t::LOCKED_OUT &&
+                               (now - last_activity_tick) >= pdMS_TO_TICKS(config::ADMIN_IDLE_TIMEOUT_MS)) {
+                        ESP_LOGI(TAG, "Admin session idle for too long. Logging out");
+                        g_admin_mode = false;
+                        state        = ui_state_t::AWAITING_PASSWORD;
+                        input_len    = 0;
+                        ui_send(password_req);
+                    }
+
+                    vTaskDelay(pdMS_TO_TICKS(config::KEYPAD_POLL_PERIOD_MS));
+                    continue;
                 }
 
-                vTaskDelay(pdMS_TO_TICKS(100));
+                ESP_LOGI(TAG, "Key pressed: %c", recv_key);
+                last_activity_tick = xTaskGetTickCount();
+
+                switch (state) {
+
+                    // -----------------------------------------------------------------
+                    case ui_state_t::AWAITING_PASSWORD: {
+                        if (recv_key >= '0' && recv_key <= '9') {
+                            if (input_len < storage::PASSWORD_LEN) {
+                                input_buf[input_len++] = recv_key;
+                            }
+                        } else if (recv_key == 'B') {
+                            if (input_len > 0) {
+                                input_buf[--input_len] = '\0';
+                            }
+                        } else if (recv_key == '*') {
+                            input_len = 0;
+                        } else if (recv_key == 'A') {
+                            if (input_len != storage::PASSWORD_LEN) {
+                                break; // Not enough digits typed yet. Ignore.
+                            }
+
+                            if (storage::check_pswd({input_buf.data(), input_len})) {
+                                ESP_LOGI(TAG, "Correct password entered. Entering admin mode");
+                                failed_attempts = 0;
+                                input_len       = 0;
+                                g_admin_mode    = true;
+                                state           = ui_state_t::ADMIN_MENU;
+                                menu_idx        = 0;
+                                ui_render_menu(menu_idx);
+                                break;
+                            }
+
+                            input_len = 0;
+                            failed_attempts++;
+                            ESP_LOGW(TAG, "Incorrect password entered (%u/%u attempts)", failed_attempts, config::MAX_PASSWORD_ATTEMPTS);
+
+                            if (failed_attempts >= config::MAX_PASSWORD_ATTEMPTS) {
+                                state              = ui_state_t::LOCKED_OUT;
+                                lockout_until_tick = xTaskGetTickCount() + pdMS_TO_TICKS(config::LOCKOUT_DURATION_MS);
+                                ESP_LOGW(TAG, "Too many failed attempts. Locking keypad for %lu ms", config::LOCKOUT_DURATION_MS);
+                                ui_send(make_custom_request("Too many tries", "Keypad locked"));
+                            } else {
+                                ui_send_feedback("Wrong password");
+                            }
+                            break;
+                        }
+
+                        if (state == ui_state_t::AWAITING_PASSWORD) {
+                            ui_render_password_prompt({input_buf.data(), input_len});
+                        }
+                        break;
+                    }
+
+                    // -----------------------------------------------------------------
+                    case ui_state_t::LOCKED_OUT: {
+                        // Ignore all input till the lockout period is over (handled above).
+                        break;
+                    }
+
+                    // -----------------------------------------------------------------
+                    case ui_state_t::ADMIN_MENU: {
+                        if (recv_key == 'C') {
+                            menu_idx = (menu_idx == 0) ? (ADMIN_MENU_ITEMS.size() - 1) : (menu_idx - 1);
+                            ui_render_menu(menu_idx);
+                        } else if (recv_key == 'D') {
+                            menu_idx = (menu_idx + 1) % ADMIN_MENU_ITEMS.size();
+                            ui_render_menu(menu_idx);
+                        } else if (recv_key == '#') {
+                            g_admin_mode = false;
+                            state        = ui_state_t::AWAITING_PASSWORD;
+                            input_len    = 0;
+                            ui_send(password_req);
+                        } else if (recv_key == 'A') {
+                            switch (menu_idx) {
+                                case 0: // View numbers
+                                {
+                                    auto pnumbers = storage::get_pnumbers();
+                                    if (!pnumbers || pnumbers->empty()) {
+                                        ui_send_feedback("No numbers", "registered yet");
+                                        ui_render_menu(menu_idx);
+                                    } else {
+                                        list_idx = 0;
+                                        state    = ui_state_t::VIEW_NUMBERS;
+                                        ui_render_number(
+                                            "Number", list_idx, pnumbers->size(), {(*pnumbers)[list_idx].data(), (*pnumbers)[list_idx].size()});
+                                    }
+                                    break;
+                                }
+                                case 1: // Add number
+                                    input_len = 0;
+                                    state     = ui_state_t::ADD_NUMBER;
+                                    ui_send(make_custom_request("New number:", static_cast<const char*>(config::COUNTRY_PNUMBER_CODE)));
+                                    break;
+                                case 2: // Remove number
+                                {
+                                    auto pnumbers = storage::get_pnumbers();
+                                    if (!pnumbers || pnumbers->empty()) {
+                                        ui_send_feedback("No numbers", "registered yet");
+                                        ui_render_menu(menu_idx);
+                                    } else {
+                                        list_idx = 0;
+                                        state    = ui_state_t::RM_NUMBER;
+                                        ui_render_number(
+                                            "Delete?", list_idx, pnumbers->size(), {(*pnumbers)[list_idx].data(), (*pnumbers)[list_idx].size()});
+                                    }
+                                    break;
+                                }
+                                case 3: // Change password
+                                    input_len = 0;
+                                    state     = ui_state_t::CHANGE_PW_NEW;
+                                    ui_send(make_custom_request("New password:", ""));
+                                    break;
+                                default:
+                                    break;
+                            }
+                        }
+                        break;
+                    }
+
+                    // -----------------------------------------------------------------
+                    case ui_state_t::VIEW_NUMBERS: {
+                        auto pnumbers = storage::get_pnumbers();
+                        if (!pnumbers || pnumbers->empty()) {
+                            state = ui_state_t::ADMIN_MENU;
+                            ui_render_menu(menu_idx);
+                            break;
+                        }
+
+                        if (recv_key == 'C') {
+                            list_idx = (list_idx == 0) ? (pnumbers->size() - 1) : (list_idx - 1);
+                        } else if (recv_key == 'D') {
+                            list_idx = (list_idx + 1) % pnumbers->size();
+                        } else if (recv_key == '*' || recv_key == 'B' || recv_key == 'A') {
+                            state = ui_state_t::ADMIN_MENU;
+                            ui_render_menu(menu_idx);
+                            break;
+                        } else if (recv_key == '#') {
+                            g_admin_mode = false;
+                            state        = ui_state_t::AWAITING_PASSWORD;
+                            ui_send(password_req);
+                            break;
+                        }
+
+                        ui_render_number("Number", list_idx, pnumbers->size(), {(*pnumbers)[list_idx].data(), (*pnumbers)[list_idx].size()});
+                        break;
+                    }
+
+                    // -----------------------------------------------------------------
+                    case ui_state_t::ADD_NUMBER: {
+                        if (recv_key >= '0' && recv_key <= '9') {
+                            if (input_len < PHONE_DIGITS_LEN) {
+                                input_buf[input_len++] = recv_key;
+                            }
+                        } else if (recv_key == 'B') {
+                            if (input_len > 0) {
+                                input_buf[--input_len] = '\0';
+                            }
+                        } else if (recv_key == '*') {
+                            state = ui_state_t::ADMIN_MENU;
+                            ui_render_menu(menu_idx);
+                            break;
+                        } else if (recv_key == '#') {
+                            g_admin_mode = false;
+                            state        = ui_state_t::AWAITING_PASSWORD;
+                            ui_send(password_req);
+                            break;
+                        } else if (recv_key == 'A') {
+                            if (input_len != PHONE_DIGITS_LEN) {
+                                break; // Not enough digits yet. Ignore.
+                            }
+
+                            std::array<char, gsm::PHONE_NUMBER_LEN> full_number{};
+                            std::copy_n(static_cast<const char*>(config::COUNTRY_PNUMBER_CODE), COUNTRY_CODE_LEN, full_number.begin());
+                            std::copy_n(input_buf.begin(), input_len, full_number.begin() + COUNTRY_CODE_LEN);
+
+                            if (auto err = storage::add_pnumber({full_number.data(), full_number.size()}); err == ESP_OK) {
+                                ESP_LOGI(TAG, "Phone number added");
+                                ui_send_feedback("Number added");
+                            } else {
+                                ESP_LOGW(TAG, "Failed to add phone number: %s", esp_err_to_name(err));
+                                ui_send_feedback("Add failed", (err == ESP_ERR_INVALID_STATE) ? "Already exists" : "Storage full?");
+                            }
+
+                            input_len = 0;
+                            state     = ui_state_t::ADMIN_MENU;
+                            ui_render_menu(menu_idx);
+                            break;
+                        }
+
+                        if (state == ui_state_t::ADD_NUMBER) {
+                            std::array<char, gsm::PHONE_NUMBER_LEN> preview{};
+                            std::copy_n(static_cast<const char*>(config::COUNTRY_PNUMBER_CODE), COUNTRY_CODE_LEN, preview.begin());
+                            std::copy_n(input_buf.begin(), input_len, preview.begin() + COUNTRY_CODE_LEN);
+                            ui_send(make_custom_request("New number:", {preview.data(), COUNTRY_CODE_LEN + input_len}));
+                        }
+                        break;
+                    }
+
+                    // -----------------------------------------------------------------
+                    case ui_state_t::RM_NUMBER: {
+                        auto pnumbers = storage::get_pnumbers();
+                        if (!pnumbers || pnumbers->empty()) {
+                            state = ui_state_t::ADMIN_MENU;
+                            ui_render_menu(menu_idx);
+                            break;
+                        }
+
+                        if (recv_key == 'C') {
+                            list_idx = (list_idx == 0) ? (pnumbers->size() - 1) : (list_idx - 1);
+                        } else if (recv_key == 'D') {
+                            list_idx = (list_idx + 1) % pnumbers->size();
+                        } else if (recv_key == '*' || recv_key == 'B') {
+                            state = ui_state_t::ADMIN_MENU;
+                            ui_render_menu(menu_idx);
+                            break;
+                        } else if (recv_key == '#') {
+                            g_admin_mode = false;
+                            state        = ui_state_t::AWAITING_PASSWORD;
+                            ui_send(password_req);
+                            break;
+                        } else if (recv_key == 'A') {
+                            const auto& target = (*pnumbers)[list_idx];
+                            if (auto err = storage::rm_pnumber({target.data(), target.size()}); err == ESP_OK) {
+                                ESP_LOGI(TAG, "Phone number removed");
+                                ui_send_feedback("Number removed");
+                            } else {
+                                ESP_LOGW(TAG, "Failed to remove phone number: %s", esp_err_to_name(err));
+                                ui_send_feedback("Removal failed");
+                            }
+                            state = ui_state_t::ADMIN_MENU;
+                            ui_render_menu(menu_idx);
+                            break;
+                        }
+
+                        if (state == ui_state_t::RM_NUMBER) {
+                            ui_render_number("Delete?", list_idx, pnumbers->size(), {(*pnumbers)[list_idx].data(), (*pnumbers)[list_idx].size()});
+                        }
+                        break;
+                    }
+
+                    // -----------------------------------------------------------------
+                    case ui_state_t::CHANGE_PW_NEW: {
+                        if (recv_key >= '0' && recv_key <= '9') {
+                            if (input_len < storage::PASSWORD_LEN) {
+                                input_buf[input_len++] = recv_key;
+                            }
+                        } else if (recv_key == 'B') {
+                            if (input_len > 0) {
+                                input_buf[--input_len] = '\0';
+                            }
+                        } else if (recv_key == '*') {
+                            input_len = 0;
+                            state     = ui_state_t::ADMIN_MENU;
+                            ui_render_menu(menu_idx);
+                            break;
+                        } else if (recv_key == '#') {
+                            g_admin_mode = false;
+                            state        = ui_state_t::AWAITING_PASSWORD;
+                            ui_send(password_req);
+                            break;
+                        } else if (recv_key == 'A') {
+                            if (input_len != storage::PASSWORD_LEN) {
+                                break; // Not enough digits yet. Ignore.
+                            }
+                            std::copy_n(input_buf.begin(), storage::PASSWORD_LEN, pw_pending.begin());
+                            input_len = 0;
+                            state     = ui_state_t::CHANGE_PW_CONFIRM;
+                            ui_send(make_custom_request("Confirm pswd:", ""));
+                            break;
+                        }
+
+                        if (state == ui_state_t::CHANGE_PW_NEW) {
+                            std::array<char, storage::PASSWORD_LEN> mask{};
+                            mask.fill('*');
+                            ui_send(make_custom_request("New password:", {mask.data(), input_len}));
+                        }
+                        break;
+                    }
+
+                    // -----------------------------------------------------------------
+                    case ui_state_t::CHANGE_PW_CONFIRM: {
+                        if (recv_key >= '0' && recv_key <= '9') {
+                            if (input_len < storage::PASSWORD_LEN) {
+                                input_buf[input_len++] = recv_key;
+                            }
+                        } else if (recv_key == 'B') {
+                            if (input_len > 0) {
+                                input_buf[--input_len] = '\0';
+                            }
+                        } else if (recv_key == '*') {
+                            input_len = 0;
+                            state     = ui_state_t::ADMIN_MENU;
+                            ui_render_menu(menu_idx);
+                            break;
+                        } else if (recv_key == '#') {
+                            g_admin_mode = false;
+                            state        = ui_state_t::AWAITING_PASSWORD;
+                            ui_send(password_req);
+                            break;
+                        } else if (recv_key == 'A') {
+                            if (input_len != storage::PASSWORD_LEN) {
+                                break; // Not enough digits yet. Ignore.
+                            }
+
+                            const bool matches = std::equal(pw_pending.begin(), pw_pending.end(), input_buf.begin());
+                            input_len          = 0;
+
+                            if (!matches) {
+                                ESP_LOGW(TAG, "Password confirmation mismatch");
+                                ui_send_feedback("Mismatch", "Try again");
+                                state = ui_state_t::CHANGE_PW_NEW;
+                                ui_send(make_custom_request("New password:", ""));
+                                break;
+                            }
+
+                            if (auto err = storage::change_pswd({pw_pending.data(), pw_pending.size()}); err == ESP_OK) {
+                                ESP_LOGI(TAG, "Password changed");
+                                ui_send_feedback("Password", "changed");
+                            } else {
+                                ESP_LOGW(TAG, "Failed to change password: %s", esp_err_to_name(err));
+                                ui_send_feedback("Change failed");
+                            }
+
+                            pw_pending.fill('\0');
+                            state = ui_state_t::ADMIN_MENU;
+                            ui_render_menu(menu_idx);
+                            break;
+                        }
+
+                        if (state == ui_state_t::CHANGE_PW_CONFIRM) {
+                            std::array<char, storage::PASSWORD_LEN> mask{};
+                            mask.fill('*');
+                            ui_send(make_custom_request("Confirm pswd:", {mask.data(), input_len}));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Renders a single request to the LCD, whether it's a canned screen_type or free-form text.
+        void render_display_request(const display_request_t& request) {
+            if (request.use_custom_text) {
+                sys::println({request.line0.data(), request.line0.size()}, 0);
+                sys::println({request.line1.data(), request.line1.size()}, 1);
+            } else {
+                sys::println(SCREEN_MAP_LUT[std::to_underlying(request.screen_type)].first, 0);
+                sys::println(SCREEN_MAP_LUT[std::to_underlying(request.screen_type)].second, 1);
             }
         }
 
@@ -173,32 +629,30 @@ namespace tasks {
 
             TRY_WITH_FUNC_VOID(display::bootup_screen(), utils::fatal());
 
-            display_request_t request = {};
+            // The last screen that was meant to persist (i.e. not itself a transient
+            // "return_to_prev" alert). This is what a transient alert reverts back to
+            // once its hold duration elapses - it can be a canned screen or the system
+            // task's current interactive UI state (menu, in-progress digit entry, etc.).
+            display_request_t persistent_request = password_req;
+            display_request_t request            = {};
 
             while (true) {
                 // Block till a request is received
                 xQueueReceive(g_display_queue, &request, portMAX_DELAY);
-                const auto& [return_to_prev_scr, screen_type, duration_ms] = request;
 
-                // Keep track of the current screen before it is changed
-                const auto previous_screen = g_current_screen.load(std::memory_order_seq_cst);
+                render_display_request(request);
 
-                // Update the global current screen variable and switch to the requested screen
-                g_current_screen = screen_type;
-                sys::println(SCREEN_MAP_LUT[std::to_underlying(screen_type)].first, 0);
-                sys::println(SCREEN_MAP_LUT[std::to_underlying(screen_type)].second, 1);
-
-                if (return_to_prev_scr) {
-                    // Hold the current screen for the requested amount of time
-                    vTaskDelay(pdMS_TO_TICKS(duration_ms));
-
-                    // Update the global current screen variable and switch back to the previous screen
-                    g_current_screen = previous_screen;
-                    sys::println(SCREEN_MAP_LUT[std::to_underlying(previous_screen)].first, 0);
-                    sys::println(SCREEN_MAP_LUT[std::to_underlying(previous_screen)].second, 1);
+                if (request.return_to_prev) {
+                    // Hold the current screen for the requested amount of time, then
+                    // revert to whatever was persistently displayed before it.
+                    vTaskDelay(pdMS_TO_TICKS(request.duration_ms));
+                    render_display_request(persistent_request);
+                } else {
+                    // This request now becomes the new baseline to revert back to.
+                    persistent_request = request;
                 }
 
-                // If return_to_prev_scr is false, there is no reason to block here.
+                // If return_to_prev is false, there is no reason to block here.
                 // Instead the screen will be held till the next display request.
             }
         }
@@ -272,10 +726,10 @@ namespace tasks {
             utils::fatal();
         }
 
-        // Spawn a temporary thread to initialize the SIM800L after 8s to avoid blocking the whole system for this period of time
+        // Spawn a temporary thread to initialize the SIM800L after 6s to avoid blocking the whole system for this period of time
         ret = xTaskCreate(
             [](void* arg) {
-                vTaskDelay(pdMS_TO_TICKS(8'000)); // Block this thread for at least 8s
+                vTaskDelay(pdMS_TO_TICKS(6'000)); // Block this thread for at least 6s
                 ESP_LOGI("GSM Init Task", "Initializing the SIM800L");
                 // Initialize the SIM800L module. The SIM800L requires around sometime after power on to fully stablize.
                 // There's still a chance for the initialization to fail. Reboot so we retry instead of hard crashing.
