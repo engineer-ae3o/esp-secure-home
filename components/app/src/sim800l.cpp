@@ -57,7 +57,7 @@ namespace gsm {
         esp_modem_dte_config_t dte_config = ESP_MODEM_DTE_DEFAULT_CONFIG();
         dte_config.uart_config.tx_io_num  = config::GSM_GPIO_TX_PIN;
         dte_config.uart_config.rx_io_num  = config::GSM_GPIO_RX_PIN;
-        dte_config.uart_config.baud_rate  = config::GSM_BAUDRATE;
+        dte_config.uart_config.baud_rate  = config::GSM_BAUD_RATE;
 
         // DCE configuation
         constexpr esp_modem_dce_config_t dce_config = ESP_MODEM_DCE_DEFAULT_CONFIG(static_cast<const char*>(config::GLO_APN));

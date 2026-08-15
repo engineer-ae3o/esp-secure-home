@@ -3,6 +3,7 @@
 
 #include "sim800l.hpp"
 #include "display.hpp"
+#include "storage.hpp"
 #include "system.hpp"
 #include "config.hpp"
 
@@ -15,13 +16,20 @@ namespace sys {
 
     namespace {
 
-        constexpr const char*    TAG                     = "System";
+        constexpr const char* TAG = "System";
+
         constexpr const uint32_t DELAY_BETWEEN_PRINTS_MS = 2000;
 
         void send_sms(std::string_view sms) {
             // Get all the stored phone numbers
+            auto pnumbers = storage::get_pnumbers();
+            if (!pnumbers) {
+                ESP_LOGE(TAG, "No curently stored phone numbers");
+            }
 
             // Then send the SMS to all the registered phone numbers
+            for (const auto& pnumber : pnumbers.value()) {
+            }
         }
 
     } // namespace

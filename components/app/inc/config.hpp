@@ -1,10 +1,8 @@
 #pragma once
 
 
-#include "sim800l.hpp"
-
-#include "driver/i2c_master.h"
 #include "driver/gpio.h"
+#include "driver/i2c_master.h"
 
 #include <array>
 #include <string_view>
@@ -26,8 +24,11 @@ namespace config {
     constexpr inline gpio_num_t GSM_GPIO_TX_PIN  = GPIO_NUM_17;
     constexpr inline gpio_num_t GSM_GPIO_RX_PIN  = GPIO_NUM_18;
     constexpr inline gpio_num_t GSM_GPIO_RST_PIN = GPIO_NUM_21;
-    constexpr inline uint32_t   GSM_BAUDRATE     = 9600;
-    constexpr inline const char GLO_APN[]        = "gloflat";
+
+    constexpr inline uint32_t   GSM_BAUD_RATE = 9600;
+    constexpr inline const char GLO_APN[]     = "gloflat";
+
+    constexpr inline const char COUNTRY_PNUMBER_CODE[] = "+234";
 
     // Keypad matrix pins (4x4)
     constexpr inline std::array<gpio_num_t, 4> KEYPAD_ROW_PINS = {{

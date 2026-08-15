@@ -16,7 +16,6 @@ namespace storage {
     constexpr inline uint32_t PASSWORD_LEN = 8;
     constexpr inline uint32_t MAX_PNUMBERS = 10;
 
-    // Type aliases so I don't go crazy from typing
     using pswd_t     = std::array<char, PASSWORD_LEN>;
     using pnumber_t  = std::array<char, gsm::PHONE_NUMBER_LEN>;
     using pnumbers_t = std::array<pnumber_t, MAX_PNUMBERS>;

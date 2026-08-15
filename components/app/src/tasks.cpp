@@ -1,4 +1,5 @@
 #include "freertos/FreeRTOS.h"
+#include "freertos/projdefs.h"
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -101,19 +102,19 @@ namespace tasks {
             };
             TRY_WITH_FUNC_VOID(esp_vfs_littlefs_register(&lfs_config), utils::fatal());
 
-            // Initialize the storage interface
-            TRY_WITH_FUNC_VOID(storage::init(), utils::fatal());
-
             // Initialize the display
             TRY_WITH_FUNC_VOID(display::init(), utils::fatal());
             TRY_WITH_FUNC_VOID(display::clear_screen(), utils::fatal());
             TRY_WITH_FUNC_VOID(display::backlight_on(), utils::fatal());
 
             // Initialize the SIM800L module. The SIM800L requires around 2-3s after power on to fully stablize.
-            //TRY_WITH_FUNC_VOID(gsm::init(), utils::fatal());
-            //TRY_THEN_LOG(gsm::get_sim_status(), "SIM card not ready"); // Not a fatal error. We'll retry later on.
+            TRY_WITH_FUNC_VOID(gsm::init(), utils::fatal());
+            TRY_THEN_LOG(gsm::get_sim_status(), "SIM card not ready"); // Not a fatal error. We'll retry later on.
 
-            ESP_LOGI("Init", "Done initiaizing all components");
+            // Initialize the storage interface
+            TRY_WITH_FUNC_VOID(storage::init(), utils::fatal());
+
+            ESP_LOGI("Init", "Done initializing all components");
         }
 
         // Helpers
@@ -136,7 +137,9 @@ namespace tasks {
         struct display_message_t {
             std::string_view top_message;
             std::string_view bottom_message;
-            uint32_t         delay_ms{};
+
+            uint32_t delay_ms{};
+            bool     got_to_previous_when_done{};
         };
 
         enum class display_event_t : uint8_t {
@@ -210,10 +213,11 @@ namespace tasks {
         }
 
         [[noreturn]] void display_task(void* arg) {
-            constexpr const char* TAG = "System_task";
-            ESP_LOGI(TAG, "System_task started");
+            constexpr const char* TAG = "Display_task";
+            ESP_LOGI(TAG, "Display_task started");
 
             while (true) {
+                vTaskDelay(pdMS_TO_TICKS(portMAX_DELAY));
             }
         }
 
