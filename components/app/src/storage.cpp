@@ -86,22 +86,15 @@ namespace storage {
             return ESP_ERR_INVALID_SIZE;
         }
 
-        /**
-         * Commented out for obvious reasons. Is only useful during development.
-         * 
-         * // Get a buffer to store the data temporarily so they can be null terminated and read
-         * std::array<char, std::max(PASSWORD_LEN, gsm::PHONE_NUMBER_LEN) + 1> temp{};
-         * 
-         * memcpy(temp.data(), &g_pswd_storage.pswd, PASSWORD_LEN);
-         * temp.back() = '\0';
-         * ESP_LOGI(TAG, "Current password: %s", temp.data());
-         * 
-         * for (size_t i = 0; i < g_pnumbers_storage.num_of_pnumbers; i++) {
-         *     memcpy(temp.data(), &g_pnumbers_storage.pnumbers[i], gsm::PHONE_NUMBER_LEN);
-         *     temp.back() = '\0';
-         *     ESP_LOGI(TAG, "Phone number %zu: %s", i, temp.data());
-         * }
-         */
+#if 1 // NOLINT(readability-avoid-unconditional-preprocessor-if)
+
+        ESP_LOGI(TAG, "Current password: %.*s", g_pswd_storage.pswd.size(), g_pswd_storage.pswd.data());
+
+        for (size_t i = 0; i < g_pnumbers_storage.num_of_pnumbers; i++) {
+            ESP_LOGI(TAG, "Phone number %zu: %.*s", i, g_pnumbers_storage.pnumbers[i].size(), g_pnumbers_storage.pnumbers[i].data());
+        }
+
+#endif
 
         g_is_initialized = true;
         return ESP_OK;
@@ -227,15 +220,35 @@ namespace storage {
         auto& [num_of_pnumbers, pnumbers] = g_pnumbers_storage;
 
         // Check if the phone number to remove is here
-        bool is_number_present = false;
+        size_t target_idx = num_of_pnumbers;
         for (size_t i = 0; i < num_of_pnumbers; i++) {
             if (std::string_view{pnumbers[i].data(), pnumbers[i].size()} == pnumber_to_rm) {
-                is_number_present = true;
+                target_idx = i;
                 break;
             }
         }
-        if (!is_number_present) {
+        if (target_idx == num_of_pnumbers) {
             return ESP_ERR_NOT_FOUND;
+        }
+
+        // Backup state before mutating array
+        const auto backup_storage = g_pnumbers_storage;
+
+        // Shift trailing elements back by 1 position
+        for (size_t i = target_idx; i < num_of_pnumbers - 1; ++i) {
+            pnumbers[i] = pnumbers[i + 1];
+        }
+
+        // Clear last active element and decrement counter
+        pnumbers[num_of_pnumbers - 1] = {};
+        num_of_pnumbers--;
+
+        // Commit updated state to flash
+        if (auto ret = file::write(file::name_t::PNUMBERS, {reinterpret_cast<const uint8_t*>(&g_pnumbers_storage), sizeof(g_pnumbers_storage)});
+            ret != ESP_OK) {
+            // Revert state on failure
+            g_pnumbers_storage = backup_storage;
+            return ret;
         }
 
         return ESP_OK;

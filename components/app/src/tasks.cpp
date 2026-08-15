@@ -1,12 +1,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/projdefs.h"
-#include "freertos/semphr.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
-#include "system.hpp"
 #include "utils.hpp"
 #include "tasks.hpp"
+#include "system.hpp"
 #include "config.hpp"
 #include "keypad.hpp"
 #include "switch.hpp"
@@ -21,9 +20,9 @@
 #include "esp_littlefs.h"
 
 #include <cstdint>
-#include <string_view>
 #include <utility>
 #include <optional>
+#include <string_view>
 
 
 namespace tasks {
@@ -86,9 +85,6 @@ namespace tasks {
                     break;
             }
 
-            // Register a shutdown handler to get called before any reboot
-            TRY_WITH_FUNC_VOID(esp_register_shutdown_handler(deinit_all), utils::fatal());
-
             // Mount the filesystem
             constexpr esp_vfs_littlefs_conf_t lfs_config = {
                 .base_path              = static_cast<const char*>(FILESYSTEM_BASE_PATH),
@@ -102,17 +98,16 @@ namespace tasks {
             };
             TRY_WITH_FUNC_VOID(esp_vfs_littlefs_register(&lfs_config), utils::fatal());
 
+            // Initialize the storage interface
+            TRY_WITH_FUNC_VOID(storage::init(), utils::fatal());
+
             // Initialize the display
             TRY_WITH_FUNC_VOID(display::init(), utils::fatal());
             TRY_WITH_FUNC_VOID(display::clear_screen(), utils::fatal());
             TRY_WITH_FUNC_VOID(display::backlight_on(), utils::fatal());
 
-            // Initialize the SIM800L module. The SIM800L requires around 2-3s after power on to fully stablize.
-            TRY_WITH_FUNC_VOID(gsm::init(), utils::fatal());
-            TRY_THEN_LOG(gsm::get_sim_status(), "SIM card not ready"); // Not a fatal error. We'll retry later on.
-
-            // Initialize the storage interface
-            TRY_WITH_FUNC_VOID(storage::init(), utils::fatal());
+            // Register a shutdown handler to get called before any reboot
+            TRY_WITH_FUNC_VOID(esp_register_shutdown_handler(deinit_all), utils::fatal());
 
             ESP_LOGI("Init", "Done initializing all components");
         }
@@ -134,21 +129,21 @@ namespace tasks {
         }
 
         //
-        struct display_message_t {
-            std::string_view top_message;
-            std::string_view bottom_message;
-
-            uint32_t delay_ms{};
-            bool     got_to_previous_when_done{};
-        };
-
         enum class display_event_t : uint8_t {
             BOOTUP,
-            PSWD_REQ,
+            PASSWORD_REQUEST,
             TAMPER_SWITCH_BROKEN_ADMIN,
             REED_SWITCH_BROKEN_ADMIN,
             TAMPER_SWITCH_BROKEN_NO_ADMIN,
             REED_SWITCH_BROKEN_NO_ADMIN,
+        };
+
+        struct display_message_t {
+            std::string_view top_message;
+            std::string_view bottom_message;
+            display_event_t  event{};
+            uint32_t         delay_ms{};
+            bool             got_to_prev_when_done{};
         };
 
         QueueHandle_t display_event_queue{};
@@ -239,6 +234,26 @@ namespace tasks {
         ret = xTaskCreate(display_task, "display_task", config::DISPlAY_TASK_STACK, nullptr, config::DISPlAY_TASK_PRIORITY, nullptr);
         if (ret != pdPASS) {
             ESP_LOGE(TAG, "Failed to create the display task");
+            utils::fatal();
+        }
+
+        // Spawn a temporary thread to initialize the SIM800L after 6s to avoid blocking the whole system for this period of time
+        ret = xTaskCreate(
+            [](void* arg) {
+                // Initialize the SIM800L module. The SIM800L requires around sometime after power on to fully stablize.
+                // There's still a chance for the initialization to fail. Reboot so we retry instead of hard crashing.
+                TRY_WITH_FUNC_VOID(gsm::init(), utils::reboot());
+                TRY_THEN_LOG(gsm::get_sim_status(), "SIM card not ready"); // Not a fatal error. We'll retry later on.
+                // Delete this thread immediately after it's done with the initialization
+                vTaskDelete(nullptr);
+            },
+            "gsm_init_task",
+            config::GSM_INIT_TASK_STACK,
+            nullptr,
+            config::GSM_INIT_TASK_PRIORITY,
+            nullptr);
+        if (ret != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create the gsm init task");
             utils::fatal();
         }
     }

@@ -24,11 +24,18 @@ namespace sys {
             // Get all the stored phone numbers
             auto pnumbers = storage::get_pnumbers();
             if (!pnumbers) {
-                ESP_LOGE(TAG, "No curently stored phone numbers");
+                ESP_LOGW(TAG, "SMS send requested, but no curently stored phone numbers");
+                return;
             }
 
             // Then send the SMS to all the registered phone numbers
             for (const auto& pnumber : pnumbers.value()) {
+                esp_err_t ret = gsm::send_sms(sms, {pnumber.data(), pnumber.size()});
+                if (ret != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to send SMS to %.*s: %s", pnumber.size(), pnumber.data(), esp_err_to_name(ret));
+                } else {
+                    ESP_LOGI(TAG, "SMS sent to %.*s", pnumber.size(), pnumber.data());
+                }
             }
         }
 
@@ -36,7 +43,9 @@ namespace sys {
 
     void println(std::string_view msg, uint8_t line) {
         static uint32_t consc_err_counter = 0;
-        if (auto ret = display::println(msg, line); ret != ESP_OK) {
+
+        auto ret = display::println(msg, line);
+        if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to send message to the display. Perharps it is disconnected?: %s", esp_err_to_name(ret));
             // Track consecutive failures
             consc_err_counter++;
@@ -54,11 +63,14 @@ namespace sys {
             // The reed switch guards the doors. It is standard behaviour for it to be broken in admin mode.
             println("  A door has   ", 0);
             println("  been opened  ", 1);
+
             ESP_LOGI(TAG, "Door opened in admin mode");
         } else {
             // Intruder alert if any switch has been broken while not in admin mode
             println("An intruder has", 0);
             println("opened a door(s)", 1);
+
+            ESP_LOGW(TAG, "An intruder has opened a door(s)");
 
             // Send the SMS to all registered phone numbers
             send_sms("An unknown person has opened one or more doors. Take safety measures accordingly.");
@@ -71,13 +83,18 @@ namespace sys {
             // a verified user to open the box. Display a warning to the user, but no need for an SMS.
             println("The control box", 0);
             println("  is not to be  ", 1);
+
+            ESP_LOGW(TAG, "The control box should not be opened");
             vTaskDelay(pdMS_TO_TICKS(DELAY_BETWEEN_PRINTS_MS));
+
             println(" tampered with. ", 0);
             println("  Please close. ", 1);
         } else {
             // Intruder alert if any switch has been broken while not in admin mode
             println("Intruder detecte", 0);
             println("d in control box", 1);
+
+            ESP_LOGW(TAG, "Intruder detected in control box");
 
             // Send the SMS to all registered phone numbers
             send_sms("An unknown person has gained access to the system control box. Take safety measures accordingly.");

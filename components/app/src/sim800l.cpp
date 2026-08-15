@@ -3,6 +3,7 @@
 #include "utils.hpp"
 
 #include "esp_err.h"
+#include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_modem_api.h"
 #include "esp_netif_types.h"
@@ -10,8 +11,10 @@
 #include "esp_netif_defaults.h"
 #include "esp_modem_c_api_types.h"
 
+#include <array>
 #include <cstring>
 #include <utility>
+#include <string_view>
 
 
 namespace gsm {
@@ -34,6 +37,8 @@ namespace gsm {
                 esp_netif_destroy(g_esp_netif);
                 g_esp_netif = nullptr;
             }
+            TRY_THEN_LOG(esp_event_loop_delete_default(), "Failed to remove the system event loop");
+            // TRY_THEN_LOG(esp_netif_deinit(),""); // Not supported yet
             g_is_initialized = false;
         }
 
@@ -44,7 +49,10 @@ namespace gsm {
             return ESP_ERR_INVALID_STATE;
         }
 
-        // Initialize the network inrterface
+        TRY(esp_event_loop_create_default());
+        TRY(esp_netif_init());
+
+        // Initialize the network interface
         const esp_netif_config_t netif_ppp_config = ESP_NETIF_DEFAULT_PPP();
 
         g_esp_netif = esp_netif_new(&netif_ppp_config);
@@ -70,6 +78,25 @@ namespace gsm {
             return ESP_ERR_NO_MEM;
         }
 
+        // Sync retry loop before reading IMSI
+        constexpr uint32_t MAX_RETRIES = 10;
+
+        bool synced = false;
+
+        for (uint32_t i = 0; i < MAX_RETRIES; ++i) {
+            if (esp_modem_sync(g_dce_handle) == ESP_OK) {
+                synced = true;
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(500)); // Wait 500ms between sync attempts
+        }
+
+        if (!synced) {
+            ESP_LOGE(TAG, "SIM800L failed to respond to AT sync");
+            cleanup();
+            return ESP_ERR_TIMEOUT;
+        }
+
         // Read the IMSI
         std::array<char, CONFIG_ESP_MODEM_C_API_STR_MAX + 1> imsi{};
         if (auto ret = esp_modem_get_imsi(g_dce_handle, imsi.data()); ret != ESP_OK) {
@@ -78,8 +105,19 @@ namespace gsm {
             return ret;
         }
 
+        // Read the IMEI
+        std::array<char, CONFIG_ESP_MODEM_C_API_STR_MAX + 1> imei{};
+        if (auto ret = esp_modem_get_imei(g_dce_handle, imei.data()); ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to read the IMEI: %s", esp_err_to_name(ret));
+            cleanup();
+            return ret;
+        }
+
         imsi.back() = '\0';
         ESP_LOGI(TAG, "IMSI of SIM Card: %s", imsi.data());
+
+        imei.back() = '\0';
+        ESP_LOGI(TAG, "IMEI of SIM Card: %s", imei.data());
 
         g_is_initialized = true;
         return ESP_OK;
@@ -115,32 +153,32 @@ namespace gsm {
         return ESP_OK;
     }
 
-    esp_err_t send_sms(const char* sms, const char* number, bool check_sim_status) {
+    esp_err_t send_sms(std::string_view sms, std::string_view pnumber) {
         if (!g_is_initialized) {
             return ESP_ERR_INVALID_STATE;
         }
 
-        if (sms == nullptr || number == nullptr) {
-            return ESP_ERR_INVALID_ARG;
-        }
-
-        const size_t sms_len    = strlen(sms);
-        const size_t number_len = strlen(number);
-
-        if (sms_len > MAX_SMS_LEN || sms_len == 0 || number_len != PHONE_NUMBER_LEN) {
+        if (sms.length() > MAX_SMS_LEN || sms.empty() || pnumber.length() != PHONE_NUMBER_LEN) {
             return ESP_ERR_INVALID_SIZE;
         }
 
-        if (check_sim_status) {
-            if (auto ret = get_sim_status(); ret != ESP_OK) {
-                return ret;
-            }
+        // check the SIM card's status before proceeding to ensure it is still alive
+        if (auto ret = get_sim_status(); ret != ESP_OK) {
+            return ret;
         }
+
+        // Temporary storage here since the sms API takes in a null terminated string and it is
+        // not guaranteed that the underlying data from the string views are null terminated.
+        std::array<char, MAX_SMS_LEN + 1>      sms_c_buf     = {};
+        std::array<char, PHONE_NUMBER_LEN + 1> pnumber_c_buf = {};
+
+        memcpy(sms_c_buf.data(), sms.data(), sms.length());
+        memcpy(pnumber_c_buf.data(), pnumber.data(), PHONE_NUMBER_LEN);
 
         // Send the SMS
         TRY(esp_modem_sms_txt_mode(g_dce_handle, true));
         TRY(esp_modem_sms_character_set(g_dce_handle));
-        TRY(esp_modem_send_sms(g_dce_handle, number, sms));
+        TRY(esp_modem_send_sms(g_dce_handle, pnumber_c_buf.data(), sms_c_buf.data()));
         TRY(esp_modem_sms_txt_mode(g_dce_handle, false));
 
         return ESP_OK;

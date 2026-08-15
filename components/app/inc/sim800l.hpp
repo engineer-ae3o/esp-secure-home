@@ -3,9 +3,8 @@
 
 #include "esp_err.h"
 
-#include <array>
 #include <cstdint>
-#include <expected>
+#include <string_view>
 
 
 namespace gsm {
@@ -19,6 +18,6 @@ namespace gsm {
 
     [[nodiscard]] esp_err_t get_sim_status();
 
-    [[nodiscard]] esp_err_t send_sms(const char* sms, const char* number, bool check_sim_status = true);
+    [[nodiscard]] esp_err_t send_sms(std::string_view sms, std::string_view pnumber);
 
 } // namespace gsm

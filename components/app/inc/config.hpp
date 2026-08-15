@@ -25,7 +25,7 @@ namespace config {
     constexpr inline gpio_num_t GSM_GPIO_RX_PIN  = GPIO_NUM_18;
     constexpr inline gpio_num_t GSM_GPIO_RST_PIN = GPIO_NUM_21;
 
-    constexpr inline uint32_t   GSM_BAUD_RATE = 9600;
+    constexpr inline uint32_t   GSM_BAUD_RATE = 57600;
     constexpr inline const char GLO_APN[]     = "gloflat";
 
     constexpr inline const char COUNTRY_PNUMBER_CODE[] = "+234";
@@ -57,10 +57,13 @@ namespace config {
     constexpr inline uint32_t MAX_CONSC_ERRORS = 5;
 
     // Task stack configuration
-    constexpr inline uint32_t DISPlAY_TASK_STACK    = 8192;
+    constexpr inline uint32_t DISPlAY_TASK_STACK    = 8 * 1024;
     constexpr inline uint32_t DISPlAY_TASK_PRIORITY = 12;
 
-    constexpr inline uint32_t SYSTEM_TASK_STACK    = 8192;
+    constexpr inline uint32_t SYSTEM_TASK_STACK    = 8 * 1024;
     constexpr inline uint32_t SYSTEM_TASK_PRIORITY = 14;
+
+    constexpr inline uint32_t GSM_INIT_TASK_STACK    = 6 * 1024;
+    constexpr inline uint32_t GSM_INIT_TASK_PRIORITY = 16;
 
 } // namespace config

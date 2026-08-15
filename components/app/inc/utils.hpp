@@ -70,13 +70,13 @@ namespace utils {
     }
 
     [[noreturn]] inline void fatal(const std::source_location& location = std::source_location::current()) {
-        ESP_LOGE("FATAL", "Unrecoverable error from %s (%s): %u", location.function_name(), location.file_name(), location.line());
-        esp_system_abort("Fatal error. Cannot recover");
+        ESP_LOGE("FATAL", "Unrecoverable error from %s (%s:%u)", location.function_name(), location.file_name(), location.line());
+        esp_system_abort("Fatal error. Cannot recover. Halting system.");
     }
 
     [[noreturn]] inline void reboot(const std::source_location& location = std::source_location::current()) {
-        ESP_LOGE("FATAL", "Unrecoverable error from %s (%s): %u", location.function_name(), location.file_name(), location.line());
-        ESP_LOGE("FATAL", "Rebooting system.");
+        ESP_LOGI("Restart", "Reboot requested from %s (%s:%u)", location.function_name(), location.file_name(), location.line());
+        ESP_LOGI("Restart", "Rebooting system.");
         esp_restart();
     }
 
