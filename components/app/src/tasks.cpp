@@ -9,6 +9,7 @@
 #include "config.hpp"
 #include "keypad.hpp"
 #include "switch.hpp"
+#include "screen.hpp"
 #include "display.hpp"
 #include "sim800l.hpp"
 #include "storage.hpp"
@@ -29,13 +30,41 @@ namespace tasks {
 
     namespace {
 
+        // Helpers
+        std::optional<nc::type_t> check_for_switch_break() {
+            uint32_t notification{};
+            xTaskNotifyWait(0, UINT32_MAX, &notification, 0);
+
+            if (notification & std::to_underlying(nc::type_t::REED)) {
+                return nc::type_t::REED;
+            }
+
+            if (notification & std::to_underlying(nc::type_t::TAMPER)) {
+                return nc::type_t::TAMPER;
+            }
+
+            return std::nullopt;
+        }
+
+        QueueHandle_t g_display_queue{};
+
         void deinit_all() {
             ESP_LOGI("Info", "Deinitializing the system. Cleaning resources");
+
             TRY_THEN_LOG(gsm::deinit(), "Failed to deinitialize the SIM800L module");
             TRY_THEN_LOG(storage::deinit(), "Failed to deinitialize the storage interface");
+
+            // We use the shutdown screen here directly. This is safe as no other thread is actively using or driving it
             TRY_THEN_LOG(display::shutdown_screen(), "Failed to display the power down screen");
             TRY_THEN_LOG(display::deinit(), "Failed to deinitialize the display");
+
             TRY_THEN_LOG(esp_vfs_littlefs_unregister(static_cast<const char*>(config::FILESYSTEM_PARTITION_LABEL)), "Failed to unmount filesystem");
+
+            if (g_display_queue) {
+                vQueueDelete(g_display_queue);
+                g_display_queue = nullptr;
+            }
+
             ESP_LOGI("Info", "Resources cleaned up");
         }
 
@@ -109,44 +138,15 @@ namespace tasks {
             // Register a shutdown handler to get called before any reboot
             TRY_WITH_FUNC_VOID(esp_register_shutdown_handler(deinit_all), utils::fatal());
 
+            // Create the display queue with a size of 16 elements to hold as many display requests as possible
+            g_display_queue = xQueueCreate(16, sizeof(display_request_t));
+            if (g_display_queue == nullptr) {
+                ESP_LOGE(TAG, "Failed to create the display queue");
+                utils::fatal();
+            }
+
             ESP_LOGI("Init", "Done initializing all components");
         }
-
-        // Helpers
-        std::optional<nc::type_t> check_for_switch_break() {
-            uint32_t notification{};
-            xTaskNotifyWait(0, UINT32_MAX, &notification, 0);
-
-            if (notification & std::to_underlying(nc::type_t::REED)) {
-                return nc::type_t::REED;
-            }
-
-            if (notification & std::to_underlying(nc::type_t::TAMPER)) {
-                return nc::type_t::TAMPER;
-            }
-
-            return std::nullopt;
-        }
-
-        //
-        enum class display_event_t : uint8_t {
-            BOOTUP,
-            PASSWORD_REQUEST,
-            TAMPER_SWITCH_BROKEN_ADMIN,
-            REED_SWITCH_BROKEN_ADMIN,
-            TAMPER_SWITCH_BROKEN_NO_ADMIN,
-            REED_SWITCH_BROKEN_NO_ADMIN,
-        };
-
-        struct display_message_t {
-            std::string_view top_message;
-            std::string_view bottom_message;
-            display_event_t  event{};
-            uint32_t         delay_ms{};
-            bool             got_to_prev_when_done{};
-        };
-
-        QueueHandle_t display_event_queue{};
 
         // Tasks
         [[noreturn]] void system_task(void* arg) {
@@ -172,10 +172,9 @@ namespace tasks {
             // Start off with at the lowest privilege level
             bool admin_mode = false;
 
-            // Bootup screen, and request for the password to enter admin mode
-            TRY_WITH_FUNC_VOID(display::bootup_screen(), utils::fatal());
-            TRY_THEN_LOG(display::clear_screen(), "Failed to clear display screen");
-            sys::println("Enter password:", 0);
+            // Push the bootup screen request, and password request screens to the display queue
+            xQueueSend(g_display_queue, &bootup, portMAX_DELAY);
+            xQueueSend(g_display_queue, &password_req, portMAX_DELAY);
 
             while (true) {
                 // Check if any switch has been broken
@@ -184,11 +183,19 @@ namespace tasks {
                     // A switch has been broken. Behaviour depends on whether we're in admin mode or not
                     switch (switch_event.value()) {
                         case nc::type_t::REED:
-                            sys::reed_switch_broken(admin_mode);
+                            if (admin_mode) {
+                                xQueueSend(g_display_queue, &reed_switch_broken_admin, portMAX_DELAY);
+                            } else {
+                                xQueueSend(g_display_queue, &reed_switch_broken_no_admin, portMAX_DELAY);
+                            }
                             break;
 
                         case nc::type_t::TAMPER:
-                            sys::tamper_switch_broken(admin_mode);
+                            if (admin_mode) {
+                                xQueueSend(g_display_queue, &tamper_switch_broken_admin, portMAX_DELAY);
+                            } else {
+                                xQueueSend(g_display_queue, &tamper_switch_broken_no_admin, portMAX_DELAY);
+                            }
                             break;
 
                         default:
@@ -237,13 +244,16 @@ namespace tasks {
             utils::fatal();
         }
 
-        // Spawn a temporary thread to initialize the SIM800L after 6s to avoid blocking the whole system for this period of time
+        // Spawn a temporary thread to initialize the SIM800L after 8s to avoid blocking the whole system for this period of time
         ret = xTaskCreate(
             [](void* arg) {
+                vTaskDelay(pdMS_TO_TICKS(8'000)); // Block this thread for at least 8s
+                ESP_LOGI("GSM Init Task", "Initializing the SIM800L");
                 // Initialize the SIM800L module. The SIM800L requires around sometime after power on to fully stablize.
                 // There's still a chance for the initialization to fail. Reboot so we retry instead of hard crashing.
                 TRY_WITH_FUNC_VOID(gsm::init(), utils::reboot());
                 TRY_THEN_LOG(gsm::get_sim_status(), "SIM card not ready"); // Not a fatal error. We'll retry later on.
+                ESP_LOGI("GSM Init Task", "Done initializing the SIM800L");
                 // Delete this thread immediately after it's done with the initialization
                 vTaskDelete(nullptr);
             },
