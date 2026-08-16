@@ -717,7 +717,7 @@ namespace tasks {
                     ESP_LOGW(TAG, "Unable to get the SIM card status: %s", esp_err_to_name(ret));
                     consc_err_counter++;
                     if (consc_err_counter >= config::MAX_GSM_CONSC_STATUS_ERRORS) {
-                        ESP_LOGE(TAG, "Too many SIM card status errors. The SIM card or the SIM800L are likely removed from the system. Rebooting");
+                        ESP_LOGE(TAG, "Too many SIM card status errors. The SIM card or the SIM800L were likely removed from the system. Rebooting");
                         utils::reboot();
                     }
                 } else {

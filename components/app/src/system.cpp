@@ -18,8 +18,6 @@ namespace sys {
 
         constexpr const char* TAG = "System";
 
-        constexpr const uint32_t DELAY_BETWEEN_PRINTS_MS = 2000;
-
         void send_sms(std::string_view sms) {
             // Get all the stored phone numbers
             auto pnumbers = storage::get_pnumbers();

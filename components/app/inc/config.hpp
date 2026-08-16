@@ -24,7 +24,7 @@ namespace config {
     constexpr inline gpio_num_t GSM_GPIO_TX_PIN = GPIO_NUM_17;
     constexpr inline gpio_num_t GSM_GPIO_RX_PIN = GPIO_NUM_18;
 
-    constexpr inline uint32_t   GSM_BAUD_RATE = 57600;
+    constexpr inline uint32_t   GSM_BAUD_RATE = 9600;
     constexpr inline const char GLO_APN[]     = "gloflat";
 
     constexpr inline const char COUNTRY_PNUMBER_CODE[] = "+234";

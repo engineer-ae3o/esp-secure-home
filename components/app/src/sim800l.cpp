@@ -113,8 +113,6 @@ namespace gsm {
             return ESP_ERR_NO_MEM;
         }
 
-        // Not needed at the moment
-#if 0   // NOLINT(readability-avoid-unconditional-preprocessor-if)
         // Sync retry loop before reading IMSI
         constexpr uint32_t MAX_RETRIES = 5;
 
@@ -133,7 +131,6 @@ namespace gsm {
             cleanup();
             return ESP_ERR_TIMEOUT;
         }
-#endif
 
         // Read the IMEI
         std::array<char, CONFIG_ESP_MODEM_C_API_STR_MAX> imei{};
