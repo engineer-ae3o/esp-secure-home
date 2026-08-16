@@ -34,6 +34,8 @@ namespace sys {
                 } else {
                     ESP_LOGI(TAG, "SMS sent to %.*s", pnumber.size(), pnumber.data());
                 }
+                // Small delay before sending the next SMS
+                vTaskDelay(pdMS_TO_TICKS(500));
             }
         }
 

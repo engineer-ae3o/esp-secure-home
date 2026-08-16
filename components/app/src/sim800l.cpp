@@ -41,11 +41,11 @@ namespace gsm {
         struct scoped_mutex_t {
         public:
             scoped_mutex_t() {
-                xSemaphoreTake(g_gsm_mutex, pdMS_TO_TICKS(portMAX_DELAY));
+                xSemaphoreTakeRecursive(g_gsm_mutex, pdMS_TO_TICKS(portMAX_DELAY));
             }
 
             ~scoped_mutex_t() {
-                xSemaphoreGive(g_gsm_mutex);
+                xSemaphoreGiveRecursive(g_gsm_mutex);
             }
 
             scoped_mutex_t(const scoped_mutex_t&)            = delete;
@@ -82,7 +82,7 @@ namespace gsm {
             return ESP_ERR_INVALID_STATE;
         }
 
-        g_gsm_mutex = xSemaphoreCreateMutexStatic(&g_gsm_mutex_stack);
+        g_gsm_mutex = xSemaphoreCreateRecursiveMutexStatic(&g_gsm_mutex_stack);
 
         TRY_WITH_FUNC(esp_event_loop_create_default(), cleanup());
         TRY_WITH_FUNC(esp_netif_init(), cleanup());
@@ -95,6 +95,7 @@ namespace gsm {
             ESP_LOGE(TAG, "Failed to create esp_netif instance");
             return ESP_ERR_NO_MEM;
         }
+
 
         // DTE configuration
         esp_modem_dte_config_t dte_config = ESP_MODEM_DTE_DEFAULT_CONFIG();
