@@ -21,9 +21,8 @@ namespace config {
     constexpr inline uint32_t LCD_ROWS    = 2;
 
     // SIM800L UART pins
-    constexpr inline gpio_num_t GSM_GPIO_TX_PIN  = GPIO_NUM_17;
-    constexpr inline gpio_num_t GSM_GPIO_RX_PIN  = GPIO_NUM_18;
-    constexpr inline gpio_num_t GSM_GPIO_RST_PIN = GPIO_NUM_21;
+    constexpr inline gpio_num_t GSM_GPIO_TX_PIN = GPIO_NUM_17;
+    constexpr inline gpio_num_t GSM_GPIO_RX_PIN = GPIO_NUM_18;
 
     constexpr inline uint32_t   GSM_BAUD_RATE = 57600;
     constexpr inline const char GLO_APN[]     = "gloflat";
@@ -57,11 +56,11 @@ namespace config {
     constexpr inline uint32_t MAX_CONSC_ERRORS = 5;
 
     // Admin mode / keypad UI
-    constexpr inline uint32_t MAX_PASSWORD_ATTEMPTS  = 5;      // Brute force protection
-    constexpr inline uint32_t LOCKOUT_DURATION_MS    = 60'000; // How long keypad is locked after too many failed attempts
-    constexpr inline uint32_t ADMIN_IDLE_TIMEOUT_MS  = 60'000; // Auto-logout from admin mode after this much inactivity
-    constexpr inline uint32_t UI_MESSAGE_DURATION_MS = 1500;   // How long transient feedback messages (e.g. "Wrong password") are shown
-    constexpr inline uint32_t KEYPAD_POLL_PERIOD_MS  = 100;    // How often the system task polls the keypad queue
+    constexpr inline uint32_t MAX_PASSWORD_ATTEMPTS  = 5;              // Brute force protection
+    constexpr inline uint32_t LOCKOUT_DURATION_MS    = 60 * 1000;      // How long keypad is locked after too many failed attempts
+    constexpr inline uint32_t ADMIN_IDLE_TIMEOUT_MS  = 10 * 60 * 1000; // Auto-logout from admin mode after this much inactivity
+    constexpr inline uint32_t UI_MESSAGE_DURATION_MS = 2 * 1000;       // How long transient feedback messages (e.g. "Wrong password") are shown
+    constexpr inline uint32_t KEYPAD_POLL_PERIOD_MS  = 100;            // How often the system task polls the keypad queue
 
     // Task stack configuration
     constexpr inline uint32_t DISPlAY_TASK_STACK    = 8 * 1024;

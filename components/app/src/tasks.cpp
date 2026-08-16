@@ -126,6 +126,7 @@ namespace tasks {
             TRY_WITH_FUNC_VOID(display::init(), utils::fatal());
             TRY_WITH_FUNC_VOID(display::clear_screen(), utils::fatal());
             TRY_WITH_FUNC_VOID(display::backlight_on(), utils::fatal());
+            TRY_WITH_FUNC_VOID(display::bootup_screen(), utils::fatal());
 
             // Register a shutdown handler to get called before any reboot
             TRY_WITH_FUNC_VOID(esp_register_shutdown_handler(deinit_all), utils::fatal());
@@ -134,7 +135,7 @@ namespace tasks {
             TRY_WITH_FUNC_VOID(gpio_install_isr_service(ESP_INTR_FLAG_LEVEL1), utils::fatal());
 
             // Create the display queue with a size of 16 elements to hold as many display requests as possible
-            g_display_queue = xQueueCreate(16, sizeof(display_request_t));
+            g_display_queue = xQueueCreate(32, sizeof(display_request_t));
             if (g_display_queue == nullptr) {
                 ESP_LOGE(TAG, "Failed to create the display queue");
                 utils::fatal();
@@ -143,7 +144,6 @@ namespace tasks {
             ESP_LOGI("Init", "Done initializing all components");
         }
 
-        // ---------------------------------------------------------------------------
         // Keypad UI / admin mode state machine
         //
         // Keypad layout is a standard 4x4 (digits 0-9, A-D, *, #). Since there's no
@@ -157,8 +157,6 @@ namespace tasks {
         //   D       - scroll down / next item
         //   *       - cancel current entry / go back one level
         //   #       - logout: return to the password prompt from anywhere in admin mode
-        // ---------------------------------------------------------------------------
-
         enum class ui_state_t : uint8_t {
             AWAITING_PASSWORD, // Default/locked state. User is typing the admin password.
             LOCKED_OUT,        // Too many failed attempts. Ignoring input until the lockout expires.
@@ -212,6 +210,17 @@ namespace tasks {
                 snprintf(header.data(), header.size(), "%.*s (%zu/%zu)", static_cast<int>(label.size()), label.data(), idx + 1, count);
             const size_t header_len = std::min(header.size(), static_cast<size_t>(std::max(written, 0)));
             ui_send(make_custom_request({header.data(), header_len}, pnumber));
+        }
+
+        // Renders a single request to the LCD, whether it's a canned screen_type or free-form text.
+        void render_display_request(const display_request_t& request) {
+            if (request.use_custom_text) {
+                sys::println({request.line0.data(), request.line0.size()}, 0);
+                sys::println({request.line1.data(), request.line1.size()}, 1);
+            } else {
+                sys::println(SCREEN_MAP_LUT[std::to_underlying(request.screen_type)].first, 0);
+                sys::println(SCREEN_MAP_LUT[std::to_underlying(request.screen_type)].second, 1);
+            }
         }
 
         [[noreturn]] void system_task(void* arg) {
@@ -276,7 +285,6 @@ namespace tasks {
 
                 switch (state) {
 
-                    // -----------------------------------------------------------------
                     case ui_state_t::AWAITING_PASSWORD: {
                         if (recv_key >= '0' && recv_key <= '9') {
                             if (input_len < storage::PASSWORD_LEN) {
@@ -325,13 +333,11 @@ namespace tasks {
                         break;
                     }
 
-                    // -----------------------------------------------------------------
                     case ui_state_t::LOCKED_OUT: {
                         // Ignore all input till the lockout period is over (handled above).
                         break;
                     }
 
-                    // -----------------------------------------------------------------
                     case ui_state_t::ADMIN_MENU: {
                         if (recv_key == 'C') {
                             menu_idx = (menu_idx == 0) ? (ADMIN_MENU_ITEMS.size() - 1) : (menu_idx - 1);
@@ -391,7 +397,6 @@ namespace tasks {
                         break;
                     }
 
-                    // -----------------------------------------------------------------
                     case ui_state_t::VIEW_NUMBERS: {
                         auto pnumbers = storage::get_pnumbers();
                         if (!pnumbers || pnumbers->empty()) {
@@ -419,7 +424,6 @@ namespace tasks {
                         break;
                     }
 
-                    // -----------------------------------------------------------------
                     case ui_state_t::ADD_NUMBER: {
                         if (recv_key >= '0' && recv_key <= '9') {
                             if (input_len < PHONE_DIGITS_LEN) {
@@ -470,7 +474,6 @@ namespace tasks {
                         break;
                     }
 
-                    // -----------------------------------------------------------------
                     case ui_state_t::RM_NUMBER: {
                         auto pnumbers = storage::get_pnumbers();
                         if (!pnumbers || pnumbers->empty()) {
@@ -512,7 +515,6 @@ namespace tasks {
                         break;
                     }
 
-                    // -----------------------------------------------------------------
                     case ui_state_t::CHANGE_PW_NEW: {
                         if (recv_key >= '0' && recv_key <= '9') {
                             if (input_len < storage::PASSWORD_LEN) {
@@ -551,7 +553,6 @@ namespace tasks {
                         break;
                     }
 
-                    // -----------------------------------------------------------------
                     case ui_state_t::CHANGE_PW_CONFIRM: {
                         if (recv_key >= '0' && recv_key <= '9') {
                             if (input_len < storage::PASSWORD_LEN) {
@@ -612,22 +613,9 @@ namespace tasks {
             }
         }
 
-        // Renders a single request to the LCD, whether it's a canned screen_type or free-form text.
-        void render_display_request(const display_request_t& request) {
-            if (request.use_custom_text) {
-                sys::println({request.line0.data(), request.line0.size()}, 0);
-                sys::println({request.line1.data(), request.line1.size()}, 1);
-            } else {
-                sys::println(SCREEN_MAP_LUT[std::to_underlying(request.screen_type)].first, 0);
-                sys::println(SCREEN_MAP_LUT[std::to_underlying(request.screen_type)].second, 1);
-            }
-        }
-
         [[noreturn]] void display_task(void* arg) {
             constexpr const char* TAG = "Display_task";
             ESP_LOGI(TAG, "Display_task started");
-
-            TRY_WITH_FUNC_VOID(display::bootup_screen(), utils::fatal());
 
             // The last screen that was meant to persist (i.e. not itself a transient
             // "return_to_prev" alert). This is what a transient alert reverts back to
@@ -678,10 +666,12 @@ namespace tasks {
                 xTaskNotifyWait(0, UINT32_MAX, &notification, portMAX_DELAY);
 
                 if (notification & std::to_underlying(nc::type_t::REED)) {
+                    ESP_LOGI(TAG, "Reed switch broken");
                     reed_switch_broken = true;
                 }
 
                 if (notification & std::to_underlying(nc::type_t::TAMPER)) {
+                    ESP_LOGI(TAG, "Tamper switch broken");
                     tamper_switch_broken = true;
                 }
 
@@ -726,16 +716,31 @@ namespace tasks {
             utils::fatal();
         }
 
-        // Spawn a temporary thread to initialize the SIM800L after 6s to avoid blocking the whole system for this period of time
         ret = xTaskCreate(
             [](void* arg) {
-                vTaskDelay(pdMS_TO_TICKS(6'000)); // Block this thread for at least 6s
-                ESP_LOGI("GSM Init Task", "Initializing the SIM800L");
-                // Initialize the SIM800L module. The SIM800L requires around sometime after power on to fully stablize.
-                // There's still a chance for the initialization to fail. Reboot so we retry instead of hard crashing.
-                TRY_WITH_FUNC_VOID(gsm::init(), utils::reboot());
+                constexpr const char* TAG = "GSM Init Task";
+
+                ESP_LOGI(TAG, "Initializing the SIM800L");
+                constexpr uint32_t NUM_OF_GSM_INIT_RETRIES = 10;
+
+                // Initialize the SIM800L module. The SIM800L requires sometime after power on for it to fully stablize.
+                // There's still a chance for the initialization to fail. Retry before declaring an error and rebooting.
+                for (size_t i = 0; i < NUM_OF_GSM_INIT_RETRIES; i++) {
+                    if (gsm::init() == ESP_OK) {
+                        ESP_LOGI(TAG, "Initialized the SIM800L on iteration %zu", i);
+                        break;
+                    } else {
+                        ESP_LOGW(TAG, "Failed to initialize the SIM800L on iteration %zu", i);
+                    }
+                    if (i == (NUM_OF_GSM_INIT_RETRIES - 1)) {
+                        ESP_LOGE(TAG, "Failed to initialize the SIM800L after %zu iterations. Rebooting.", i);
+                        utils::reboot();
+                    }
+                }
+
                 TRY_THEN_LOG(gsm::get_sim_status(), "SIM card not ready"); // Not a fatal error. We'll retry later on.
-                ESP_LOGI("GSM Init Task", "Done initializing the SIM800L");
+                ESP_LOGI(TAG, "Done initializing the SIM800L and the SIM card");
+
                 // Delete this thread immediately after it's done with the initialization
                 vTaskDelete(nullptr);
             },

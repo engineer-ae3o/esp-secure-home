@@ -17,9 +17,9 @@ namespace {
 
     // This file provides a bunch of helper utilities for the system and display tasks
 
-    // The canned (static, pre-authored) display screens. Anything whose text is known
-    // up front lives here. Anything data-dependent (menus, typed digits, phone number
-    // lists, etc.) is sent as free-form text instead - see make_custom_request() below.
+    // The canned (static, pre authored) display screens. Anything whose text is known
+    // up front lives here. Anything data dependent (menus, typed digits, phone number
+    // lists, etc.) is sent as free form text instead see make_custom_request() below.
     enum class screen_t : uint8_t {
         PASSWORD_REQUEST,
         TAMPER_SWITCH_BROKEN_ADMIN,
@@ -37,9 +37,9 @@ namespace {
     // new screen to be displayed should last until the next display request.
     //
     // If use_custom_text is set, line0/line1 are shown verbatim instead of looking
-    // screen_type up in SCREEN_MAP_LUT. This is how the interactive (keypad-driven) UI -
-    // menus, typed digits, phone number lists, feedback messages - gets rendered, while
-    // still going through the same single queue/single-writer path as the canned alerts
+    // screen_type up in SCREEN_MAP_LUT. This is how the interactive (keypad driven) UI
+    // menus, typed digits, phone number lists, feedback messages gets rendered, while
+    // still going through the same single queue/single writer path as the canned alerts
     // below, so nothing ever races on the LCD.
     struct display_request_t {
         bool return_to_prev{};
@@ -53,7 +53,7 @@ namespace {
     };
 
     // Builds a display line of exactly LCD_COLUMNS characters: copies in as much of
-    // `text` as fits and space-pads the rest, so the display task never has to think
+    // `text` as fits and space pads the rest, so the display task never has to think
     // about padding/truncation itself.
     constexpr std::array<char, config::LCD_COLUMNS> make_line(std::string_view text) {
         std::array<char, config::LCD_COLUMNS> line{};
@@ -65,7 +65,7 @@ namespace {
         return line;
     }
 
-    // Builds a display request carrying free-form text rather than a canned screen_type.
+    // Builds a display request carrying free form text rather than a canned screen_type.
     constexpr display_request_t
     make_custom_request(std::string_view line0_text, std::string_view line1_text, bool return_to_prev = false, uint16_t duration_ms = 0) {
         return {
@@ -122,7 +122,7 @@ namespace {
         [std::to_underlying(screen_t::PASSWORD_REQUEST)] =
             {
                 // The default screen after boot. User can enter the password to enter admin mode.
-                "Enter password:",
+                "Enter password: ",
                 "",
             },
         [std::to_underlying(screen_t::TAMPER_SWITCH_BROKEN_ADMIN)] =
@@ -130,7 +130,7 @@ namespace {
                 // The tamper switch guards the control box containing the components. Not standard behaviour for
                 // a verified user to open the box. Display a warning to the user, but no need for an SMS.
                 "Please leave the",
-                "  control box  ",
+                "  control box.  ",
             },
         [std::to_underlying(screen_t::REED_SWITCH_BROKEN_ADMIN)] =
             {
@@ -141,14 +141,14 @@ namespace {
         [std::to_underlying(screen_t::TAMPER_SWITCH_BROKEN_NO_ADMIN)] =
             {
                 // Intruder alert if any switch has been broken while not in admin mode
-                "Intruder detecte",
-                "d in control box",
+                "  Intruder in   ",
+                "the control box.",
             },
         [std::to_underlying(screen_t::REED_SWITCH_BROKEN_NO_ADMIN)] =
             {
                 // Intruder alert if any switch has been broken while not in admin mode
-                "An intruder has",
-                "  opened a door ",
+                "An intruder has ",
+                " opened a door. ",
             },
     }};
 

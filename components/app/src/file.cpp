@@ -104,6 +104,10 @@ namespace file {
             utils::fatal();
         }
 
+        if (fflush(sentinel) != 0 || fsync(fileno(sentinel)) != 0) {
+            ESP_LOGE(TAG, "Failed to flush the sentinel file");
+        }
+
         if (fclose(sentinel) != 0) {
             ESP_LOGE(TAG, "Failed to close the sentinel file %s: %s", SENTINEL_FILE_PATH.data(), strerror(errno));
         }

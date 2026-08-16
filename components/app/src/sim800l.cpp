@@ -100,14 +100,6 @@ namespace gsm {
         }
 #endif
 
-        // Read the IMSI
-        std::array<char, CONFIG_ESP_MODEM_C_API_STR_MAX> imsi{};
-        if (auto ret = esp_modem_get_imsi(g_dce_handle, imsi.data()); ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to read the IMSI of the SIM card: %s", esp_err_to_name(ret));
-            cleanup();
-            return ret;
-        }
-
         // Read the IMEI
         std::array<char, CONFIG_ESP_MODEM_C_API_STR_MAX> imei{};
         if (auto ret = esp_modem_get_imei(g_dce_handle, imei.data()); ret != ESP_OK) {
@@ -116,8 +108,17 @@ namespace gsm {
             return ret;
         }
 
-        ESP_LOGI(TAG, "IMSI of the SIM Card: %.*s", imsi.size(), imsi.data());
         ESP_LOGI(TAG, "IMEI of the SIM800L: %.*s", imei.size(), imei.data());
+
+        // Read the IMSI
+        std::array<char, CONFIG_ESP_MODEM_C_API_STR_MAX> imsi{};
+        if (auto ret = esp_modem_get_imsi(g_dce_handle, imsi.data()); ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to read the IMSI of the SIM card: %s", esp_err_to_name(ret));
+            cleanup();
+            return ret;
+        }
+
+        ESP_LOGI(TAG, "IMSI of the SIM Card: %.*s", imsi.size(), imsi.data());
 
         g_is_initialized = true;
         return ESP_OK;

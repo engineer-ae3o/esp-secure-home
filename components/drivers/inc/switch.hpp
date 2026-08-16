@@ -61,7 +61,15 @@ namespace nc {
             TRY_WITH_FUNC(gpio_isr_handler_add(m_config.pin, irq_handler, this), cleanup());
 
             // Create the debounce timer
-            m_debounce_timer = xTimerCreateStatic("Deb timer", pdMS_TO_TICKS(DEBOUNCE_MS), pdFALSE, this, deb_timer_cb, &m_deb_timer_tcb);
+            if constexpr (type == type_t::REED) {
+                m_debounce_timer =
+                    xTimerCreateStatic("Reed debounce timer", pdMS_TO_TICKS(REED_SWITCH_DEBOUNCE_MS), pdFALSE, this, deb_timer_cb, &m_deb_timer_tcb);
+            } else if constexpr (type == type_t::TAMPER) {
+                m_debounce_timer = xTimerCreateStatic(
+                    "Tamper debounce timer", pdMS_TO_TICKS(TAMPER_SWITCH_DEBOUNCE_MS), pdFALSE, this, deb_timer_cb, &m_deb_timer_tcb);
+            } else {
+                static_assert(false);
+            }
 
             m_is_initialized = true;
             return ESP_OK;
@@ -88,7 +96,11 @@ namespace nc {
         TimerHandle_t m_debounce_timer{};
         StaticTimer_t m_deb_timer_tcb{};
 
-        constexpr static uint32_t DEBOUNCE_MS = 50;
+        // After measurements and observations with my logic analyzer, I can see that the tamper switch
+        // is extremely noisy and this noise can last for a long time (relatively). So it needs a much
+        // debounce time than the reed switch, which is relatively quiet compared to it.
+        constexpr static uint32_t REED_SWITCH_DEBOUNCE_MS   = 50;
+        constexpr static uint32_t TAMPER_SWITCH_DEBOUNCE_MS = 200;
 
         void cleanup() {
             gpio_intr_disable(m_config.pin);
