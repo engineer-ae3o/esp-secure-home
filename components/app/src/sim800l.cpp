@@ -1,3 +1,9 @@
+#include "freertos/FreeRTOS.h"
+#include "freertos/projdefs.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+#include "portmacro.h"
+
 #include "sim800l.hpp"
 #include "config.hpp"
 #include "utils.hpp"
@@ -28,7 +34,27 @@ namespace gsm {
         esp_modem_dce_t* g_dce_handle{};
         esp_netif_t*     g_esp_netif{};
 
-        void cleanup() {
+        SemaphoreHandle_t g_gsm_mutex{};
+        StaticSemaphore_t g_gsm_mutex_stack{};
+
+        // RAII helper for taking and freeing the mutex
+        struct scoped_mutex_t {
+        public:
+            scoped_mutex_t() {
+                xSemaphoreTake(g_gsm_mutex, pdMS_TO_TICKS(portMAX_DELAY));
+            }
+
+            ~scoped_mutex_t() {
+                xSemaphoreGive(g_gsm_mutex);
+            }
+
+            scoped_mutex_t(const scoped_mutex_t&)            = delete;
+            scoped_mutex_t& operator=(const scoped_mutex_t&) = delete;
+            scoped_mutex_t(scoped_mutex_t&&)                 = delete;
+            scoped_mutex_t& operator=(scoped_mutex_t&&)      = delete;
+        };
+
+        void cleanup(bool delete_mutex = true) {
             if (g_dce_handle) {
                 esp_modem_destroy(g_dce_handle);
                 g_dce_handle = nullptr;
@@ -39,6 +65,13 @@ namespace gsm {
             }
             TRY_THEN_LOG(esp_event_loop_delete_default(), "Failed to remove the system event loop");
             // TRY_THEN_LOG(esp_netif_deinit(),""); // Not supported yet by ESP-IDF
+            if (delete_mutex) {
+                if (g_gsm_mutex) {
+                    vSemaphoreDelete(g_gsm_mutex);
+                    g_gsm_mutex_stack = {};
+                    g_gsm_mutex       = nullptr;
+                }
+            }
             g_is_initialized = false;
         }
 
@@ -49,8 +82,10 @@ namespace gsm {
             return ESP_ERR_INVALID_STATE;
         }
 
-        TRY(esp_event_loop_create_default());
-        TRY(esp_netif_init());
+        g_gsm_mutex = xSemaphoreCreateMutexStatic(&g_gsm_mutex_stack);
+
+        TRY_WITH_FUNC(esp_event_loop_create_default(), cleanup());
+        TRY_WITH_FUNC(esp_netif_init(), cleanup());
 
         // Initialize the network interface
         const esp_netif_config_t netif_ppp_config = ESP_NETIF_DEFAULT_PPP();
@@ -129,11 +164,25 @@ namespace gsm {
             return ESP_ERR_INVALID_STATE;
         }
 
-        cleanup();
+        // Take the mutex to ensure the cleanup is thread safe and no other thread holds the mutex as it is about to be deleted
+        {
+            [[maybe_unused]] scoped_mutex_t scoped_mutex;
+            cleanup(false);
+        }
+
+        // Delete the mutex manually only after cleaning other resources
+        if (g_gsm_mutex) {
+            vSemaphoreDelete(g_gsm_mutex);
+            g_gsm_mutex_stack = {};
+            g_gsm_mutex       = nullptr;
+        }
+
         return ESP_OK;
     }
 
     esp_err_t get_sim_status() {
+        [[maybe_unused]] scoped_mutex_t scoped_mutex;
+
         if (!g_is_initialized) {
             return ESP_ERR_INVALID_STATE;
         }
@@ -142,10 +191,10 @@ namespace gsm {
 
         auto ret = esp_modem_read_pin_state(g_dce_handle, &pin_state);
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "SIM800L not responding: %s", esp_err_to_name(ret));
+            ESP_LOGE(TAG, "SIM800L and/or SIM card not responding: %s", esp_err_to_name(ret));
             return ret;
         } else if (pin_state == ESP_MODEM_SIM_PIN_STATE_READY) {
-            ESP_LOGI(TAG, "SIM card present and ready");
+            ESP_LOGI(TAG, "SIM card present and the SIM800L responding.");
         } else {
             ESP_LOGW(TAG, "SIM card present but requires unlocking. State = %d", std::to_underlying(pin_state));
             return ESP_FAIL;
@@ -155,6 +204,8 @@ namespace gsm {
     }
 
     esp_err_t send_sms(std::string_view sms, std::string_view pnumber) {
+        [[maybe_unused]] scoped_mutex_t scoped_mutex;
+
         if (!g_is_initialized) {
             return ESP_ERR_INVALID_STATE;
         }
@@ -163,9 +214,25 @@ namespace gsm {
             return ESP_ERR_INVALID_SIZE;
         }
 
-        // check the SIM card's status before proceeding to ensure it is still alive
-        if (auto ret = get_sim_status(); ret != ESP_OK) {
-            return ret;
+        constexpr uint32_t SIM_STATUS_RETRIES = 6;
+        constexpr uint32_t SMS_SEND_RETRIES   = 6;
+
+        constexpr uint32_t DELAY_BETWEEN_RETRIES_MS = 50;
+
+        // Check the SIM card's status before proceeding to try to send the SMS
+        for (size_t i = 0; i < SIM_STATUS_RETRIES; i++) {
+            esp_err_t ret = get_sim_status();
+            if (ret == ESP_OK) {
+                ESP_LOGI(TAG, "SIM800L and SIM card in right state for sending the SMS");
+                break;
+            }
+            ESP_LOGW(TAG, "Invalid SIM card status (%s) on iteration %zu", esp_err_to_name(ret), i);
+
+            if (i == (SIM_STATUS_RETRIES - 1)) {
+                ESP_LOGE(TAG, "Failed to get the SIM800L to right state for sending the SMS after %zu iterations", SIM_STATUS_RETRIES);
+                return ret;
+            }
+            vTaskDelay(pdMS_TO_TICKS(DELAY_BETWEEN_RETRIES_MS));
         }
 
         // Temporary storage here since the sms API takes in a null terminated string and it is
@@ -176,11 +243,26 @@ namespace gsm {
         memcpy(sms_c_buf.data(), sms.data(), sms.length());
         memcpy(pnumber_c_buf.data(), pnumber.data(), PHONE_NUMBER_LEN);
 
-        // Send the SMS
+        // Set the right modes before sending the SMS
+        TRY(esp_modem_set_mode(g_dce_handle, ESP_MODEM_MODE_COMMAND));
         TRY(esp_modem_sms_txt_mode(g_dce_handle, true));
         TRY(esp_modem_sms_character_set(g_dce_handle));
-        TRY(esp_modem_send_sms(g_dce_handle, pnumber_c_buf.data(), sms_c_buf.data()));
-        TRY(esp_modem_sms_txt_mode(g_dce_handle, false));
+
+        // Send the SMS and retry on failure
+        for (size_t i = 0; i < SMS_SEND_RETRIES; i++) {
+            esp_err_t ret = esp_modem_send_sms(g_dce_handle, pnumber_c_buf.data(), sms_c_buf.data());
+            if (ret == ESP_OK) {
+                ESP_LOGI(TAG, "SMS sent to %s successfully", pnumber_c_buf.data());
+                break;
+            }
+            ESP_LOGW(TAG, "Failed to send the SMS (%s) on iteration %zu", esp_err_to_name(ret), i);
+
+            if (i == (SMS_SEND_RETRIES - 1)) {
+                ESP_LOGE(TAG, "Failed to send SMS after %zu iterations", SMS_SEND_RETRIES);
+                return ret;
+            }
+            vTaskDelay(pdMS_TO_TICKS(DELAY_BETWEEN_RETRIES_MS));
+        }
 
         return ESP_OK;
     }

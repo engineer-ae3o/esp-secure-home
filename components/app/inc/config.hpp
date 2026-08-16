@@ -63,16 +63,20 @@ namespace config {
     constexpr inline uint32_t KEYPAD_POLL_PERIOD_MS  = 100;            // How often the system task polls the keypad queue
 
     // Task stack configuration
-    constexpr inline uint32_t DISPlAY_TASK_STACK    = 8 * 1024;
-    constexpr inline uint32_t DISPlAY_TASK_PRIORITY = 9;
+    constexpr inline uint32_t DISPlAY_TASK_STACK    = 6 * 1024;
+    constexpr inline uint32_t DISPlAY_TASK_PRIORITY = 10;
 
     constexpr inline uint32_t SWITCH_TASK_STACK    = 6 * 1024;
-    constexpr inline uint32_t SWITCH_TASK_PRIORITY = 11;
+    constexpr inline uint32_t SWITCH_TASK_PRIORITY = 16;
 
     constexpr inline uint32_t SYSTEM_TASK_STACK    = 8 * 1024;
-    constexpr inline uint32_t SYSTEM_TASK_PRIORITY = 12;
+    constexpr inline uint32_t SYSTEM_TASK_PRIORITY = 14;
 
-    constexpr inline uint32_t GSM_INIT_TASK_STACK    = 6 * 1024;
-    constexpr inline uint32_t GSM_INIT_TASK_PRIORITY = 10;
+    constexpr inline uint32_t GSM_TASK_STACK    = 6 * 1024;
+    constexpr inline uint32_t GSM_TASK_PRIORITY = 8;
+
+    constexpr inline uint32_t NUM_OF_GSM_INIT_RETRIES     = 10;
+    constexpr inline uint32_t MAX_GSM_CONSC_STATUS_ERRORS = 10;
+    constexpr inline uint32_t GSM_TASK_PERIOD_MS          = 30 * 1000;
 
 } // namespace config

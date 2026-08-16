@@ -689,6 +689,44 @@ namespace tasks {
             }
         }
 
+        [[noreturn]] void gsm_task(void* arg) {
+            constexpr const char* TAG = "GSM_task";
+            ESP_LOGI(TAG, "Initializing the SIM800L");
+
+            // Initialize the SIM800L module. The SIM800L requires sometime after power on for it to fully stablize.
+            // There's still a chance for the initialization to fail. Retry before declaring an error and rebooting.
+            for (size_t i = 0; i < config::NUM_OF_GSM_INIT_RETRIES; i++) {
+                if (gsm::init() == ESP_OK) {
+                    ESP_LOGI(TAG, "Initialized the SIM800L on iteration %zu", i);
+                    break;
+                }
+                ESP_LOGW(TAG, "Failed to initialize the SIM800L on iteration %zu", i);
+
+                if (i == (config::NUM_OF_GSM_INIT_RETRIES - 1)) {
+                    ESP_LOGE(TAG, "Failed to initialize the SIM800L after %zu iterations. Rebooting.", i + 1);
+                    utils::reboot();
+                }
+            }
+            ESP_LOGI(TAG, "Done initializing the SIM800L and the SIM card");
+
+            // Track consecutive SIM card status check errors
+            uint32_t consc_err_counter = 0;
+
+            while (true) {
+                if (auto ret = gsm::get_sim_status(); ret != ESP_OK) {
+                    ESP_LOGW(TAG, "Unable to get the SIM card status: %s", esp_err_to_name(ret));
+                    consc_err_counter++;
+                    if (consc_err_counter >= config::MAX_GSM_CONSC_STATUS_ERRORS) {
+                        ESP_LOGE(TAG, "Too many SIM card status errors. The SIM card or the SIM800L are likely removed from the system. Rebooting");
+                        utils::reboot();
+                    }
+                } else {
+                    consc_err_counter = 0;
+                }
+                vTaskDelay(pdMS_TO_TICKS(config::GSM_TASK_PERIOD_MS));
+            }
+        }
+
     } // namespace
 
     void run() {
@@ -716,41 +754,9 @@ namespace tasks {
             utils::fatal();
         }
 
-        ret = xTaskCreate(
-            [](void* arg) {
-                constexpr const char* TAG = "GSM Init Task";
-
-                ESP_LOGI(TAG, "Initializing the SIM800L");
-                constexpr uint32_t NUM_OF_GSM_INIT_RETRIES = 10;
-
-                // Initialize the SIM800L module. The SIM800L requires sometime after power on for it to fully stablize.
-                // There's still a chance for the initialization to fail. Retry before declaring an error and rebooting.
-                for (size_t i = 0; i < NUM_OF_GSM_INIT_RETRIES; i++) {
-                    if (gsm::init() == ESP_OK) {
-                        ESP_LOGI(TAG, "Initialized the SIM800L on iteration %zu", i);
-                        break;
-                    } else {
-                        ESP_LOGW(TAG, "Failed to initialize the SIM800L on iteration %zu", i);
-                    }
-                    if (i == (NUM_OF_GSM_INIT_RETRIES - 1)) {
-                        ESP_LOGE(TAG, "Failed to initialize the SIM800L after %zu iterations. Rebooting.", i);
-                        utils::reboot();
-                    }
-                }
-
-                TRY_THEN_LOG(gsm::get_sim_status(), "SIM card not ready"); // Not a fatal error. We'll retry later on.
-                ESP_LOGI(TAG, "Done initializing the SIM800L and the SIM card");
-
-                // Delete this thread immediately after it's done with the initialization
-                vTaskDelete(nullptr);
-            },
-            "gsm_init_task",
-            config::GSM_INIT_TASK_STACK,
-            nullptr,
-            config::GSM_INIT_TASK_PRIORITY,
-            nullptr);
+        ret = xTaskCreate(gsm_task, "gsm_task", config::GSM_TASK_STACK, nullptr, config::GSM_TASK_PRIORITY, nullptr);
         if (ret != pdPASS) {
-            ESP_LOGE(TAG, "Failed to create the gsm init task");
+            ESP_LOGE(TAG, "Failed to create the gsm task");
             utils::fatal();
         }
     }
