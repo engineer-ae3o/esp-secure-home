@@ -11,8 +11,10 @@
 #include "switch.hpp"
 #include "screen.hpp"
 #include "display.hpp"
-#include "sim800l.hpp"
+#include "telegram.hpp"
 #include "storage.hpp"
+#include "multitap.hpp"
+#include "wifi.hpp"
 
 #include "esp_log.h"
 #include "portmacro.h"
@@ -22,6 +24,7 @@
 #include <array>
 #include <atomic>
 #include <cstdio>
+#include <cstring>
 #include <cstdint>
 #include <utility>
 #include <algorithm>
@@ -32,7 +35,7 @@ namespace tasks {
 
     namespace {
 
-        // Start off with at the lowest privilege level
+        // Start off at the lowest privilege level
         std::atomic<bool> g_admin_mode = false;
 
         // The display queue to which display requests are passed into
@@ -42,7 +45,7 @@ namespace tasks {
         void deinit_all() {
             ESP_LOGI("Info", "Deinitializing the system. Cleaning resources");
 
-            TRY_THEN_LOG(gsm::deinit(), "Failed to deinitialize the SIM800L module");
+            TRY_THEN_LOG(wifi::deinit(), "Failed to deinitialize WiFi");
             TRY_THEN_LOG(storage::deinit(), "Failed to deinitialize the storage interface");
             TRY_THEN_LOG(gpio_uninstall_isr_service(), "Failed to uninstall the gpio isr service");
 
@@ -128,6 +131,25 @@ namespace tasks {
             TRY_WITH_FUNC_VOID(display::backlight_on(), utils::fatal());
             TRY_WITH_FUNC_VOID(display::bootup_screen(), utils::fatal());
 
+            // Bring up the WiFi radio (no connection attempted yet - just init).
+            TRY_WITH_FUNC_VOID(wifi::init(), utils::fatal());
+
+            // If we have credentials saved from a previous "WiFi setup" session, try them now.
+            // Not fatal on failure - the device is still fully usable locally (keypad, LCD,
+            // switches), and the admin menu's "WiFi setup" lets this be fixed without a re-flash.
+            if (auto creds = storage::get_wifi_creds(); creds.has_value()) {
+                const size_t ssid_len = std::strlen(creds->ssid.data());
+                const size_t pw_len   = std::strlen(creds->password.data());
+
+                ESP_LOGI("Init", "Found saved WiFi credentials for \"%.*s\". Attempting to connect", static_cast<int>(ssid_len), creds->ssid.data());
+
+                if (auto ret = wifi::connect({creds->ssid.data(), ssid_len}, {creds->password.data(), pw_len}); ret != ESP_OK) {
+                    ESP_LOGW("Init", "Failed to connect to saved WiFi on boot: %s", esp_err_to_name(ret));
+                }
+            } else {
+                ESP_LOGW("Init", "No saved WiFi credentials. Use the admin menu's \"WiFi setup\" to configure one");
+            }
+
             // Register a shutdown handler to get called before any reboot
             TRY_WITH_FUNC_VOID(esp_register_shutdown_handler(deinit_all), utils::fatal());
 
@@ -146,37 +168,42 @@ namespace tasks {
 
         // Keypad UI / admin mode state machine
         //
-        // Keypad layout is a standard 4x4 (digits 0-9, A-D, *, #). Since there's no
-        // way to type symbols like '+', A-D/*/# are reserved as control keys and only
-        // digits are ever accepted as data (passwords and phone numbers are digits-only
-        // as far as user entry is concerned):
+        // Keypad layout is a standard 4x4 (digits 0-9, A-D, *, #). A-D/*/# are reserved
+        // as control keys:
         //
         //   A       - OK / confirm / select
-        //   B       - backspace (delete last typed digit)
-        //   C       - scroll up / previous item
+        //   B       - backspace (delete last typed char)
+        //   C       - scroll up / previous item  (in WIFI_PW_ENTRY: toggle upper/lowercase instead)
         //   D       - scroll down / next item
         //   *       - cancel current entry / go back one level
         //   #       - logout: return to the password prompt from anywhere in admin mode
+        //
+        // Everything except WiFi passwords is digits-only as far as user entry goes
+        // (admin password, Telegram chat IDs). WiFi passwords use multi-tap text entry
+        // (see multitap.hpp) since real WPA2 passwords need letters/symbols the keypad
+        // has no dedicated keys for.
         enum class ui_state_t : uint8_t {
             AWAITING_PASSWORD, // Default/locked state. User is typing the admin password.
             LOCKED_OUT,        // Too many failed attempts. Ignoring input until the lockout expires.
             ADMIN_MENU,        // Top level admin menu.
-            VIEW_NUMBERS,      // Scrolling through the registered phone numbers (read only).
-            ADD_NUMBER,        // Typing a new phone number to register.
-            RM_NUMBER,         // Scrolling through registered numbers to pick one to remove.
+            VIEW_NUMBERS,      // Scrolling through the registered Telegram recipients (read only).
+            ADD_NUMBER,        // Typing a new recipient's chat ID to register.
+            RM_NUMBER,         // Scrolling through registered recipients to pick one to remove.
             CHANGE_PW_NEW,     // Typing the new password.
             CHANGE_PW_CONFIRM, // Re-typing the new password to confirm it.
+            WIFI_SCANNING,     // Transient. Shows "Scanning..." while wifi::scan() runs.
+            WIFI_LIST,         // Scrolling through found networks to pick one.
+            WIFI_PW_ENTRY,     // Multi-tap password entry for the selected network.
+            WIFI_CONNECTING,   // Transient. Shows "Connecting..." while wifi::connect() runs.
         };
 
-        constexpr std::array<std::string_view, 4> ADMIN_MENU_ITEMS = {
+        constexpr std::array<std::string_view, 5> ADMIN_MENU_ITEMS = {
             "View numbers",
             "Add number",
             "Remove number",
             "Change password",
+            "WiFi setup",
         };
-
-        constexpr size_t COUNTRY_CODE_LEN = sizeof(config::COUNTRY_PNUMBER_CODE) - 1; // Leave out the null terminator
-        constexpr size_t PHONE_DIGITS_LEN = gsm::PHONE_NUMBER_LEN - COUNTRY_CODE_LEN; // Digits the user actually types
 
         // Sends a request to the display queue, blocking until there's room for it.
         void ui_send(const display_request_t& request) {
@@ -201,15 +228,37 @@ namespace tasks {
             ui_send(make_custom_request("-- Admin Menu --", ADMIN_MENU_ITEMS[menu_idx]));
         }
 
-        // Renders "<label> (i/n)" on line0 and the phone number itself on line1. Used by
-        // both the view and remove number flows.
-        void ui_render_number(std::string_view label, size_t idx, size_t count, std::string_view pnumber) {
+        // Renders "<label> (i/n)" on line0 and the value itself on line1. Used by
+        // both the view and remove recipient flows.
+        void ui_render_number(std::string_view label, size_t idx, size_t count, std::string_view value) {
             std::array<char, config::LCD_COLUMNS> header{};
 
             const int written =
                 snprintf(header.data(), header.size(), "%.*s (%zu/%zu)", static_cast<int>(label.size()), label.data(), idx + 1, count);
             const size_t header_len = std::min(header.size(), static_cast<size_t>(std::max(written, 0)));
-            ui_send(make_custom_request({header.data(), header_len}, pnumber));
+            ui_send(make_custom_request({header.data(), header_len}, value));
+        }
+
+        // Renders "Network (i/n)" on line0 and the (possibly truncated) SSID on line1.
+        // Truncated SSIDs get a trailing '>' so it's obvious there's more to the name
+        // than what's shown on the 16-column display.
+        void ui_render_wifi_entry(size_t idx, size_t count, const wifi::ap_info_t& ap) {
+            std::array<char, config::LCD_COLUMNS> header{};
+            const int                             written    = snprintf(header.data(), header.size(), "Network (%zu/%zu)", idx + 1, count);
+            const size_t                          header_len = std::min(header.size(), static_cast<size_t>(std::max(written, 0)));
+
+            std::string_view                      ssid_sv{ap.ssid.data()};
+            std::array<char, config::LCD_COLUMNS> ssid_line{};
+            ssid_line.fill(' ');
+
+            const bool   truncated = ssid_sv.size() > config::LCD_COLUMNS;
+            const size_t copy_len  = std::min<size_t>(ssid_sv.size(), config::LCD_COLUMNS - (truncated ? 1 : 0));
+            std::copy_n(ssid_sv.begin(), copy_len, ssid_line.begin());
+            if (truncated) {
+                ssid_line[config::LCD_COLUMNS - 1] = '>';
+            }
+
+            ui_send(make_custom_request({header.data(), header_len}, {ssid_line.data(), ssid_line.size()}));
         }
 
         // Renders a single request to the LCD, whether it's a canned screen_type or free-form text.
@@ -237,19 +286,30 @@ namespace tasks {
 
             ui_state_t state = ui_state_t::AWAITING_PASSWORD;
 
-            // Digit entry buffer, sized for the largest thing ever typed into it (a phone number).
-            std::array<char, PHONE_DIGITS_LEN> input_buf{};
-            size_t                             input_len = 0;
+            // Digit entry buffer, sized for the largest thing ever typed into it (a chat ID).
+            std::array<char, telegram::CHAT_ID_LEN> input_buf{};
+            size_t                                  input_len = 0;
 
             // Holds the first entry of a new password while the user is asked to confirm it.
             std::array<char, storage::PASSWORD_LEN> pw_pending{};
 
             size_t   menu_idx        = 0; // Selected item in the admin menu
-            size_t   list_idx        = 0; // Selected item while viewing/removing phone numbers
+            size_t   list_idx        = 0; // Selected item while viewing/removing recipients
             uint32_t failed_attempts = 0; // Consecutive failed password attempts (brute force protection)
 
             TickType_t lockout_until_tick = 0;
             TickType_t last_activity_tick = xTaskGetTickCount();
+
+            // WiFi setup state
+            std::array<wifi::ap_info_t, wifi::MAX_SCAN_RESULTS> wifi_scan_results{};
+            size_t                                              wifi_scan_count = 0;
+            size_t                                              wifi_list_idx   = 0;
+
+            std::array<char, wifi::SSID_LEN + 1>         wifi_selected_ssid{};
+            std::array<char, wifi::PASSWORD_MAX_LEN + 1> wifi_pw_buf{};
+            size_t                                       wifi_pw_len = 0;
+
+            multitap::session_t mt_session{};
 
             // Push the password request screen to the display queue
             ui_send(password_req);
@@ -257,9 +317,13 @@ namespace tasks {
             while (true) {
                 auto ret = xQueueReceive(keypad_event_queue, &recv_key, 0);
 
-                // Handle lockout expiry / admin idle timeout even when no key was pressed
+                // Handle lockout expiry / admin idle timeout / multi-tap timeout even when no key was pressed
                 if (ret != pdPASS) {
                     const auto now = xTaskGetTickCount();
+
+                    if (state == ui_state_t::WIFI_PW_ENTRY) {
+                        mt_session.tick_timeout();
+                    }
 
                     if (state == ui_state_t::LOCKED_OUT && now >= lockout_until_tick) {
                         ESP_LOGI(TAG, "Lockout period over. Accepting password attempts again");
@@ -354,34 +418,36 @@ namespace tasks {
                             switch (menu_idx) {
                                 case 0: // View numbers
                                 {
-                                    auto pnumbers = storage::get_pnumbers();
-                                    if (!pnumbers || pnumbers->empty()) {
+                                    auto recipients = storage::get_recipients();
+                                    if (!recipients || recipients->empty()) {
                                         ui_send_feedback("No numbers", "registered yet");
                                         ui_render_menu(menu_idx);
                                     } else {
                                         list_idx = 0;
                                         state    = ui_state_t::VIEW_NUMBERS;
                                         ui_render_number(
-                                            "Number", list_idx, pnumbers->size(), {(*pnumbers)[list_idx].data(), (*pnumbers)[list_idx].size()});
+                                            "Number", list_idx, recipients->size(), {(*recipients)[list_idx].data(), (*recipients)[list_idx].size()});
                                     }
                                     break;
                                 }
                                 case 1: // Add number
                                     input_len = 0;
                                     state     = ui_state_t::ADD_NUMBER;
-                                    ui_send(make_custom_request("New number:", static_cast<const char*>(config::COUNTRY_PNUMBER_CODE)));
+                                    ui_send(make_custom_request("New chat ID:", ""));
                                     break;
                                 case 2: // Remove number
                                 {
-                                    auto pnumbers = storage::get_pnumbers();
-                                    if (!pnumbers || pnumbers->empty()) {
+                                    auto recipients = storage::get_recipients();
+                                    if (!recipients || recipients->empty()) {
                                         ui_send_feedback("No numbers", "registered yet");
                                         ui_render_menu(menu_idx);
                                     } else {
                                         list_idx = 0;
                                         state    = ui_state_t::RM_NUMBER;
-                                        ui_render_number(
-                                            "Delete?", list_idx, pnumbers->size(), {(*pnumbers)[list_idx].data(), (*pnumbers)[list_idx].size()});
+                                        ui_render_number("Delete?",
+                                                         list_idx,
+                                                         recipients->size(),
+                                                         {(*recipients)[list_idx].data(), (*recipients)[list_idx].size()});
                                     }
                                     break;
                                 }
@@ -390,6 +456,25 @@ namespace tasks {
                                     state     = ui_state_t::CHANGE_PW_NEW;
                                     ui_send(make_custom_request("New password:", ""));
                                     break;
+                                case 4: // WiFi setup
+                                {
+                                    state = ui_state_t::WIFI_SCANNING;
+                                    ui_send(make_custom_request("Scanning for", "networks..."));
+
+                                    esp_err_t scan_ret = wifi::scan(wifi_scan_results, wifi_scan_count);
+                                    if (scan_ret != ESP_OK || wifi_scan_count == 0) {
+                                        ESP_LOGW(TAG, "WiFi scan found nothing or failed: %s", esp_err_to_name(scan_ret));
+                                        ui_send_feedback("No networks", "found");
+                                        state = ui_state_t::ADMIN_MENU;
+                                        ui_render_menu(menu_idx);
+                                        break;
+                                    }
+
+                                    wifi_list_idx = 0;
+                                    state         = ui_state_t::WIFI_LIST;
+                                    ui_render_wifi_entry(wifi_list_idx, wifi_scan_count, wifi_scan_results[wifi_list_idx]);
+                                    break;
+                                }
                                 default:
                                     break;
                             }
@@ -398,17 +483,17 @@ namespace tasks {
                     }
 
                     case ui_state_t::VIEW_NUMBERS: {
-                        auto pnumbers = storage::get_pnumbers();
-                        if (!pnumbers || pnumbers->empty()) {
+                        auto recipients = storage::get_recipients();
+                        if (!recipients || recipients->empty()) {
                             state = ui_state_t::ADMIN_MENU;
                             ui_render_menu(menu_idx);
                             break;
                         }
 
                         if (recv_key == 'C') {
-                            list_idx = (list_idx == 0) ? (pnumbers->size() - 1) : (list_idx - 1);
+                            list_idx = (list_idx == 0) ? (recipients->size() - 1) : (list_idx - 1);
                         } else if (recv_key == 'D') {
-                            list_idx = (list_idx + 1) % pnumbers->size();
+                            list_idx = (list_idx + 1) % recipients->size();
                         } else if (recv_key == '*' || recv_key == 'B' || recv_key == 'A') {
                             state = ui_state_t::ADMIN_MENU;
                             ui_render_menu(menu_idx);
@@ -420,13 +505,13 @@ namespace tasks {
                             break;
                         }
 
-                        ui_render_number("Number", list_idx, pnumbers->size(), {(*pnumbers)[list_idx].data(), (*pnumbers)[list_idx].size()});
+                        ui_render_number("Number", list_idx, recipients->size(), {(*recipients)[list_idx].data(), (*recipients)[list_idx].size()});
                         break;
                     }
 
                     case ui_state_t::ADD_NUMBER: {
                         if (recv_key >= '0' && recv_key <= '9') {
-                            if (input_len < PHONE_DIGITS_LEN) {
+                            if (input_len < telegram::CHAT_ID_LEN) {
                                 input_buf[input_len++] = recv_key;
                             }
                         } else if (recv_key == 'B') {
@@ -443,19 +528,15 @@ namespace tasks {
                             ui_send(password_req);
                             break;
                         } else if (recv_key == 'A') {
-                            if (input_len != PHONE_DIGITS_LEN) {
+                            if (input_len != telegram::CHAT_ID_LEN) {
                                 break; // Not enough digits yet. Ignore.
                             }
 
-                            std::array<char, gsm::PHONE_NUMBER_LEN> full_number{};
-                            std::copy_n(static_cast<const char*>(config::COUNTRY_PNUMBER_CODE), COUNTRY_CODE_LEN, full_number.begin());
-                            std::copy_n(input_buf.begin(), input_len, full_number.begin() + COUNTRY_CODE_LEN);
-
-                            if (auto err = storage::add_pnumber({full_number.data(), full_number.size()}); err == ESP_OK) {
-                                ESP_LOGI(TAG, "Phone number added");
+                            if (auto err = storage::add_recipient({input_buf.data(), input_len}); err == ESP_OK) {
+                                ESP_LOGI(TAG, "Recipient added");
                                 ui_send_feedback("Number added");
                             } else {
-                                ESP_LOGW(TAG, "Failed to add phone number: %s", esp_err_to_name(err));
+                                ESP_LOGW(TAG, "Failed to add recipient: %s", esp_err_to_name(err));
                                 ui_send_feedback("Add failed", (err == ESP_ERR_INVALID_STATE) ? "Already exists" : "Storage full?");
                             }
 
@@ -466,26 +547,23 @@ namespace tasks {
                         }
 
                         if (state == ui_state_t::ADD_NUMBER) {
-                            std::array<char, gsm::PHONE_NUMBER_LEN> preview{};
-                            std::copy_n(static_cast<const char*>(config::COUNTRY_PNUMBER_CODE), COUNTRY_CODE_LEN, preview.begin());
-                            std::copy_n(input_buf.begin(), input_len, preview.begin() + COUNTRY_CODE_LEN);
-                            ui_send(make_custom_request("New number:", {preview.data(), COUNTRY_CODE_LEN + input_len}));
+                            ui_send(make_custom_request("New chat ID:", {input_buf.data(), input_len}));
                         }
                         break;
                     }
 
                     case ui_state_t::RM_NUMBER: {
-                        auto pnumbers = storage::get_pnumbers();
-                        if (!pnumbers || pnumbers->empty()) {
+                        auto recipients = storage::get_recipients();
+                        if (!recipients || recipients->empty()) {
                             state = ui_state_t::ADMIN_MENU;
                             ui_render_menu(menu_idx);
                             break;
                         }
 
                         if (recv_key == 'C') {
-                            list_idx = (list_idx == 0) ? (pnumbers->size() - 1) : (list_idx - 1);
+                            list_idx = (list_idx == 0) ? (recipients->size() - 1) : (list_idx - 1);
                         } else if (recv_key == 'D') {
-                            list_idx = (list_idx + 1) % pnumbers->size();
+                            list_idx = (list_idx + 1) % recipients->size();
                         } else if (recv_key == '*' || recv_key == 'B') {
                             state = ui_state_t::ADMIN_MENU;
                             ui_render_menu(menu_idx);
@@ -496,12 +574,12 @@ namespace tasks {
                             ui_send(password_req);
                             break;
                         } else if (recv_key == 'A') {
-                            const auto& target = (*pnumbers)[list_idx];
-                            if (auto err = storage::rm_pnumber({target.data(), target.size()}); err == ESP_OK) {
-                                ESP_LOGI(TAG, "Phone number removed");
+                            const auto& target = (*recipients)[list_idx];
+                            if (auto err = storage::rm_recipient({target.data(), target.size()}); err == ESP_OK) {
+                                ESP_LOGI(TAG, "Recipient removed");
                                 ui_send_feedback("Number removed");
                             } else {
-                                ESP_LOGW(TAG, "Failed to remove phone number: %s", esp_err_to_name(err));
+                                ESP_LOGW(TAG, "Failed to remove recipient: %s", esp_err_to_name(err));
                                 ui_send_feedback("Removal failed");
                             }
                             state = ui_state_t::ADMIN_MENU;
@@ -510,7 +588,8 @@ namespace tasks {
                         }
 
                         if (state == ui_state_t::RM_NUMBER) {
-                            ui_render_number("Delete?", list_idx, pnumbers->size(), {(*pnumbers)[list_idx].data(), (*pnumbers)[list_idx].size()});
+                            ui_render_number(
+                                "Delete?", list_idx, recipients->size(), {(*recipients)[list_idx].data(), (*recipients)[list_idx].size()});
                         }
                         break;
                     }
@@ -609,6 +688,129 @@ namespace tasks {
                         }
                         break;
                     }
+
+                    case ui_state_t::WIFI_SCANNING: {
+                        // Transient - scan() is synchronous and already moved state on
+                        // by the time control would reach here.
+                        break;
+                    }
+
+                    case ui_state_t::WIFI_LIST: {
+                        if (recv_key == 'C') {
+                            wifi_list_idx = (wifi_list_idx == 0) ? (wifi_scan_count - 1) : (wifi_list_idx - 1);
+                        } else if (recv_key == 'D') {
+                            wifi_list_idx = (wifi_list_idx + 1) % wifi_scan_count;
+                        } else if (recv_key == '*') {
+                            state = ui_state_t::ADMIN_MENU;
+                            ui_render_menu(menu_idx);
+                            break;
+                        } else if (recv_key == '#') {
+                            g_admin_mode = false;
+                            state        = ui_state_t::AWAITING_PASSWORD;
+                            ui_send(password_req);
+                            break;
+                        } else if (recv_key == 'A') {
+                            const auto& chosen = wifi_scan_results[wifi_list_idx];
+                            wifi_selected_ssid.fill('\0');
+                            std::strncpy(wifi_selected_ssid.data(), chosen.ssid.data(), wifi_selected_ssid.size() - 1);
+                            const size_t ssid_len = std::strlen(wifi_selected_ssid.data());
+
+                            if (chosen.authmode == WIFI_AUTH_OPEN) {
+                                // No password needed - connect straight away.
+                                state = ui_state_t::WIFI_CONNECTING;
+                                ui_send(make_custom_request("Connecting to", {wifi_selected_ssid.data(), ssid_len}));
+
+                                esp_err_t conn_ret = wifi::connect({wifi_selected_ssid.data(), ssid_len}, "");
+                                if (conn_ret == ESP_OK) {
+                                    [[maybe_unused]] auto _ = storage::set_wifi_creds({wifi_selected_ssid.data(), ssid_len}, "");
+                                    ui_send_feedback("Connected!");
+                                } else {
+                                    ui_send_feedback("Connect failed", "Check network");
+                                }
+                                state = ui_state_t::ADMIN_MENU;
+                                ui_render_menu(menu_idx);
+                            } else {
+                                wifi_pw_len = 0;
+                                wifi_pw_buf.fill('\0');
+                                mt_session.reset();
+                                state = ui_state_t::WIFI_PW_ENTRY;
+                                ui_send(make_custom_request("Password:", ""));
+                            }
+                            break;
+                        }
+
+                        ui_render_wifi_entry(wifi_list_idx, wifi_scan_count, wifi_scan_results[wifi_list_idx]);
+                        break;
+                    }
+
+                    case ui_state_t::WIFI_PW_ENTRY: {
+                        if (recv_key >= '0' && recv_key <= '9') {
+                            if (!mt_session.on_digit(recv_key, wifi_pw_buf, wifi_pw_len)) {
+                                break; // Buffer full, press dropped
+                            }
+                        } else if (recv_key == 'B') {
+                            if (wifi_pw_len > 0) {
+                                wifi_pw_buf[--wifi_pw_len] = '\0';
+                            }
+                            mt_session.on_backspace();
+                        } else if (recv_key == 'C') {
+                            mt_session.toggle_caps(wifi_pw_buf, wifi_pw_len);
+                        } else if (recv_key == '*') {
+                            state = ui_state_t::WIFI_LIST;
+                            ui_render_wifi_entry(wifi_list_idx, wifi_scan_count, wifi_scan_results[wifi_list_idx]);
+                            break;
+                        } else if (recv_key == '#') {
+                            g_admin_mode = false;
+                            state        = ui_state_t::AWAITING_PASSWORD;
+                            ui_send(password_req);
+                            break;
+                        } else if (recv_key == 'A') {
+                            if (wifi_pw_len < 8) { // WPA2 minimum
+                                ui_send_feedback("Too short", "Min 8 chars");
+                                break;
+                            }
+
+                            const size_t ssid_len = std::strlen(wifi_selected_ssid.data());
+                            state                 = ui_state_t::WIFI_CONNECTING;
+                            ui_send(make_custom_request("Connecting to", {wifi_selected_ssid.data(), ssid_len}));
+
+                            esp_err_t conn_ret = wifi::connect({wifi_selected_ssid.data(), ssid_len}, {wifi_pw_buf.data(), wifi_pw_len});
+                            if (conn_ret == ESP_OK) {
+                                [[maybe_unused]] auto _ =
+                                    storage::set_wifi_creds({wifi_selected_ssid.data(), ssid_len}, {wifi_pw_buf.data(), wifi_pw_len});
+                                ui_send_feedback("Connected!");
+                            } else {
+                                ui_send_feedback("Connect failed", "Wrong password?");
+                            }
+
+                            wifi_pw_buf.fill('\0');
+                            wifi_pw_len = 0;
+                            state       = ui_state_t::ADMIN_MENU;
+                            ui_render_menu(menu_idx);
+                            break;
+                        }
+
+                        if (state == ui_state_t::WIFI_PW_ENTRY) {
+                            // Mask everything except the char currently being cycled (if
+                            // any), so the user can see what they're about to lock in -
+                            // same trick old T9 phones used for password fields.
+                            std::array<char, wifi::PASSWORD_MAX_LEN> display_buf{};
+                            for (size_t i = 0; i < wifi_pw_len; i++) {
+                                const bool is_live_char = mt_session.pending && (i == wifi_pw_len - 1);
+                                display_buf[i]          = is_live_char ? wifi_pw_buf[i] : '*';
+                            }
+                            // Show only the trailing LCD_COLUMNS characters so typing past 16 chars scrolls.
+                            const size_t start = wifi_pw_len > config::LCD_COLUMNS ? (wifi_pw_len - config::LCD_COLUMNS) : 0;
+                            ui_send(make_custom_request("Password:", {display_buf.data() + start, wifi_pw_len - start}));
+                        }
+                        break;
+                    }
+
+                    case ui_state_t::WIFI_CONNECTING: {
+                        // Transient - connect() is synchronous, state has already moved
+                        // on by the time control would reach here.
+                        break;
+                    }
                 }
             }
         }
@@ -689,41 +891,29 @@ namespace tasks {
             }
         }
 
-        [[noreturn]] void gsm_task(void* arg) {
-            constexpr const char* TAG = "GSM_task";
-            ESP_LOGI(TAG, "Initializing the SIM800L");
+        [[noreturn]] void wifi_task(void* arg) {
+            constexpr const char* TAG = "WiFi_task";
+            ESP_LOGI(TAG, "WiFi_task started");
 
-            // Initialize the SIM800L module. The SIM800L requires sometime after power on for it to fully stablize.
-            // There's still a chance for the initialization to fail. Retry before declaring an error and rebooting.
-            for (size_t i = 0; i < config::NUM_OF_GSM_INIT_RETRIES; i++) {
-                if (gsm::init() == ESP_OK) {
-                    ESP_LOGI(TAG, "Initialized the SIM800L on iteration %zu", i);
-                    break;
-                }
-                ESP_LOGW(TAG, "Failed to initialize the SIM800L on iteration %zu", i);
-
-                if (i == (config::NUM_OF_GSM_INIT_RETRIES - 1)) {
-                    ESP_LOGE(TAG, "Failed to initialize the SIM800L after %zu iterations. Rebooting.", i + 1);
-                    utils::reboot();
-                }
-            }
-            ESP_LOGI(TAG, "Done initializing the SIM800L and the SIM card");
-
-            // Track consecutive SIM card status check errors
+            // wifi::init() and the initial connect attempt (if credentials were saved)
+            // already happened in init_all() before any task was created. This task just
+            // periodically checks the connection is still alive - actual reconnect-on-drop
+            // is handled inside wifi.cpp's own event handler; this is a backstop in case
+            // that gets stuck.
             uint32_t consc_err_counter = 0;
 
             while (true) {
-                if (auto ret = gsm::get_sim_status(); ret != ESP_OK) {
-                    ESP_LOGW(TAG, "Unable to get the SIM card status: %s", esp_err_to_name(ret));
+                if (!wifi::is_connected()) {
+                    ESP_LOGW(TAG, "WiFi not connected");
                     consc_err_counter++;
-                    if (consc_err_counter >= config::MAX_GSM_CONSC_STATUS_ERRORS) {
-                        ESP_LOGE(TAG, "Too many SIM card status errors. The SIM card or the SIM800L were likely removed from the system. Rebooting");
+                    if (consc_err_counter >= config::MAX_WIFI_CONSC_STATUS_ERRORS) {
+                        ESP_LOGE(TAG, "WiFi has been down too long. Rebooting to force a clean reconnect attempt");
                         utils::reboot();
                     }
                 } else {
                     consc_err_counter = 0;
                 }
-                vTaskDelay(pdMS_TO_TICKS(config::GSM_TASK_PERIOD_MS));
+                vTaskDelay(pdMS_TO_TICKS(config::WIFI_TASK_PERIOD_MS));
             }
         }
 
@@ -754,9 +944,9 @@ namespace tasks {
             utils::fatal();
         }
 
-        ret = xTaskCreate(gsm_task, "gsm_task", config::GSM_TASK_STACK, nullptr, config::GSM_TASK_PRIORITY, nullptr);
+        ret = xTaskCreate(wifi_task, "wifi_task", config::WIFI_TASK_STACK, nullptr, config::WIFI_TASK_PRIORITY, nullptr);
         if (ret != pdPASS) {
-            ESP_LOGE(TAG, "Failed to create the gsm task");
+            ESP_LOGE(TAG, "Failed to create the wifi task");
             utils::fatal();
         }
     }

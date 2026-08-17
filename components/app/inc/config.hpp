@@ -20,14 +20,8 @@ namespace config {
     constexpr inline uint32_t LCD_COLUMNS = 16;
     constexpr inline uint32_t LCD_ROWS    = 2;
 
-    // SIM800L UART pins
-    constexpr inline gpio_num_t GSM_GPIO_TX_PIN = GPIO_NUM_17;
-    constexpr inline gpio_num_t GSM_GPIO_RX_PIN = GPIO_NUM_18;
-
-    constexpr inline uint32_t   GSM_BAUD_RATE = 9600;
-    constexpr inline const char GLO_APN[]     = "gloflat";
-
-    constexpr inline const char COUNTRY_PNUMBER_CODE[] = "+234";
+    // WiFi / Telegram
+    constexpr inline const char TELEGRAM_BOT_TOKEN[] = "REPLACE_WITH_YOUR_BOT_TOKEN";
 
     // Keypad matrix pins (4x4)
     constexpr inline std::array<gpio_num_t, 4> KEYPAD_ROW_PINS = {{
@@ -72,11 +66,10 @@ namespace config {
     constexpr inline uint32_t SYSTEM_TASK_STACK    = 8 * 1024;
     constexpr inline uint32_t SYSTEM_TASK_PRIORITY = 14;
 
-    constexpr inline uint32_t GSM_TASK_STACK    = 6 * 1024;
-    constexpr inline uint32_t GSM_TASK_PRIORITY = 8;
+    constexpr inline uint32_t WIFI_TASK_STACK    = 4 * 1024;
+    constexpr inline uint32_t WIFI_TASK_PRIORITY = 8;
 
-    constexpr inline uint32_t NUM_OF_GSM_INIT_RETRIES     = 10;
-    constexpr inline uint32_t MAX_GSM_CONSC_STATUS_ERRORS = 10;
-    constexpr inline uint32_t GSM_TASK_PERIOD_MS          = 30 * 1000;
+    constexpr inline uint32_t MAX_WIFI_CONSC_STATUS_ERRORS = 10;
+    constexpr inline uint32_t WIFI_TASK_PERIOD_MS          = 30 * 1000;
 
 } // namespace config

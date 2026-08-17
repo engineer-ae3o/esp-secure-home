@@ -21,20 +21,24 @@ namespace file {
 
         constexpr char DIR_NAME[] = "storage";
 
-        constexpr auto CRYPTO_DIR_PATH    = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME);
-        constexpr auto PSWD_FILE_PATH     = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME, "/", "password.txt");
-        constexpr auto PNUMBERS_FILE_PATH = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME, "/", "phone_numbers.txt");
-        constexpr auto SENTINEL_FILE_PATH = utils::concat(config::FILESYSTEM_BASE_PATH, "/", "sentinel.txt");
+        constexpr auto CRYPTO_DIR_PATH     = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME);
+        constexpr auto PSWD_FILE_PATH      = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME, "/", "password.txt");
+        constexpr auto RECIPIENTS_FILE_PATH = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME, "/", "recipients.txt");
+        constexpr auto WIFI_CREDS_FILE_PATH = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME, "/", "wifi_creds.txt");
+        constexpr auto SENTINEL_FILE_PATH   = utils::concat(config::FILESYSTEM_BASE_PATH, "/", "sentinel.txt");
 
         FILE* g_pswd_file{};
-        FILE* g_pnumbers_file{};
+        FILE* g_recipients_file{};
+        FILE* g_wifi_creds_file{};
 
         std::pair<FILE*, const char*> get_file_handle(name_t file) {
             switch (file) {
-                case name_t::PNUMBERS:
-                    return {g_pnumbers_file, PNUMBERS_FILE_PATH.data()};
+                case name_t::RECIPIENTS:
+                    return {g_recipients_file, RECIPIENTS_FILE_PATH.data()};
                 case name_t::PSWD:
                     return {g_pswd_file, PSWD_FILE_PATH.data()};
+                case name_t::WIFI_CREDS:
+                    return {g_wifi_creds_file, WIFI_CREDS_FILE_PATH.data()};
                 default:
                     return {nullptr, nullptr};
             }
@@ -51,11 +55,21 @@ namespace file {
             utils::fatal();
         }
 
-        g_pnumbers_file = fopen(PNUMBERS_FILE_PATH.data(), "rb+");
-        if (g_pnumbers_file == nullptr) {
-            ESP_LOGE(TAG, "Failed to open %s: %s", PNUMBERS_FILE_PATH.data(), strerror(errno));
+        g_recipients_file = fopen(RECIPIENTS_FILE_PATH.data(), "rb+");
+        if (g_recipients_file == nullptr) {
+            ESP_LOGE(TAG, "Failed to open %s: %s", RECIPIENTS_FILE_PATH.data(), strerror(errno));
             fclose(g_pswd_file);
             g_pswd_file = nullptr;
+            utils::fatal();
+        }
+
+        g_wifi_creds_file = fopen(WIFI_CREDS_FILE_PATH.data(), "rb+");
+        if (g_wifi_creds_file == nullptr) {
+            ESP_LOGE(TAG, "Failed to open %s: %s", WIFI_CREDS_FILE_PATH.data(), strerror(errno));
+            fclose(g_pswd_file);
+            g_pswd_file = nullptr;
+            fclose(g_recipients_file);
+            g_recipients_file = nullptr;
             utils::fatal();
         }
 
@@ -72,11 +86,18 @@ namespace file {
             g_pswd_file = nullptr;
         }
 
-        if (g_pnumbers_file) {
-            if (fclose(g_pnumbers_file) != 0) {
-                ESP_LOGE(TAG, "Failed to close %s: %s", PNUMBERS_FILE_PATH.data(), strerror(errno));
+        if (g_recipients_file) {
+            if (fclose(g_recipients_file) != 0) {
+                ESP_LOGE(TAG, "Failed to close %s: %s", RECIPIENTS_FILE_PATH.data(), strerror(errno));
             }
-            g_pnumbers_file = nullptr;
+            g_recipients_file = nullptr;
+        }
+
+        if (g_wifi_creds_file) {
+            if (fclose(g_wifi_creds_file) != 0) {
+                ESP_LOGE(TAG, "Failed to close %s: %s", WIFI_CREDS_FILE_PATH.data(), strerror(errno));
+            }
+            g_wifi_creds_file = nullptr;
         }
 
         // NOLINTEND(cppcoreguidelines-owning-memory)
@@ -87,7 +108,6 @@ namespace file {
 
         FILE* sentinel = fopen(SENTINEL_FILE_PATH.data(), "r");
         if (sentinel) [[likely]] {
-            // The file exists. This is not the first boot
             fclose(sentinel);
             return false;
         }
@@ -97,7 +117,6 @@ namespace file {
             utils::fatal();
         }
 
-        // Create the file now since it didn't exist previously
         sentinel = fopen(SENTINEL_FILE_PATH.data(), "w");
         if (sentinel == nullptr) {
             ESP_LOGE(TAG, "Failed to create the sentinel file %s: %s", SENTINEL_FILE_PATH.data(), strerror(errno));
@@ -131,12 +150,25 @@ namespace file {
             utils::fatal();
         }
 
-        g_pnumbers_file = fopen(PNUMBERS_FILE_PATH.data(), "wb+");
-        if (g_pnumbers_file == nullptr) {
-            ESP_LOGE(TAG, "Failed to create %s: %s", PNUMBERS_FILE_PATH.data(), strerror(errno));
+        g_recipients_file = fopen(RECIPIENTS_FILE_PATH.data(), "wb+");
+        if (g_recipients_file == nullptr) {
+            ESP_LOGE(TAG, "Failed to create %s: %s", RECIPIENTS_FILE_PATH.data(), strerror(errno));
             fclose(g_pswd_file);
             g_pswd_file = nullptr;
             remove(PSWD_FILE_PATH.data());
+            rmdir(CRYPTO_DIR_PATH.data());
+            utils::fatal();
+        }
+
+        g_wifi_creds_file = fopen(WIFI_CREDS_FILE_PATH.data(), "wb+");
+        if (g_wifi_creds_file == nullptr) {
+            ESP_LOGE(TAG, "Failed to create %s: %s", WIFI_CREDS_FILE_PATH.data(), strerror(errno));
+            fclose(g_pswd_file);
+            g_pswd_file = nullptr;
+            fclose(g_recipients_file);
+            g_recipients_file = nullptr;
+            remove(PSWD_FILE_PATH.data());
+            remove(RECIPIENTS_FILE_PATH.data());
             rmdir(CRYPTO_DIR_PATH.data());
             utils::fatal();
         }
@@ -204,7 +236,6 @@ namespace file {
                 clearerr(handle);
                 return ESP_ERR_INVALID_SIZE;
             }
-            // Should not reach here
             return ESP_ERR_INVALID_RESPONSE;
         }
 

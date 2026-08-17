@@ -11,7 +11,8 @@ namespace file {
 
     enum class name_t : uint8_t {
         PSWD = 0,
-        PNUMBERS,
+        RECIPIENTS,
+        WIFI_CREDS,
     };
 
     void create();
