@@ -21,7 +21,7 @@ namespace config {
     constexpr inline uint32_t LCD_ROWS    = 2;
 
     // WiFi / Telegram
-    constexpr inline const char TELEGRAM_BOT_TOKEN[] = "REPLACE_WITH_YOUR_BOT_TOKEN";
+    constexpr inline const char TELEGRAM_BOT_TOKEN[] = "...";
 
     // Keypad matrix pins (4x4)
     constexpr inline std::array<gpio_num_t, 4> KEYPAD_ROW_PINS = {{
@@ -52,7 +52,7 @@ namespace config {
     // Admin mode / keypad UI
     constexpr inline uint32_t MAX_PASSWORD_ATTEMPTS  = 5;              // Brute force protection
     constexpr inline uint32_t LOCKOUT_DURATION_MS    = 60 * 1000;      // How long keypad is locked after too many failed attempts
-    constexpr inline uint32_t ADMIN_IDLE_TIMEOUT_MS  = 10 * 60 * 1000; // Auto-logout from admin mode after this much inactivity
+    constexpr inline uint32_t ADMIN_IDLE_TIMEOUT_MS  = 10 * 60 * 1000; // Auto-logout from admin mode after inactivity
     constexpr inline uint32_t UI_MESSAGE_DURATION_MS = 2 * 1000;       // How long transient feedback messages (e.g. "Wrong password") are shown
     constexpr inline uint32_t KEYPAD_POLL_PERIOD_MS  = 100;            // How often the system task polls the keypad queue
 
@@ -60,13 +60,13 @@ namespace config {
     constexpr inline uint32_t DISPlAY_TASK_STACK    = 6 * 1024;
     constexpr inline uint32_t DISPlAY_TASK_PRIORITY = 10;
 
-    constexpr inline uint32_t SWITCH_TASK_STACK    = 6 * 1024;
+    constexpr inline uint32_t SWITCH_TASK_STACK    = 4 * 1024;
     constexpr inline uint32_t SWITCH_TASK_PRIORITY = 16;
 
     constexpr inline uint32_t SYSTEM_TASK_STACK    = 8 * 1024;
     constexpr inline uint32_t SYSTEM_TASK_PRIORITY = 14;
 
-    constexpr inline uint32_t WIFI_TASK_STACK    = 4 * 1024;
+    constexpr inline uint32_t WIFI_TASK_STACK    = 3 * 1024;
     constexpr inline uint32_t WIFI_TASK_PRIORITY = 8;
 
     constexpr inline uint32_t MAX_WIFI_CONSC_STATUS_ERRORS = 10;

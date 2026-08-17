@@ -4,9 +4,10 @@
 #include "wifi.hpp"
 #include "utils.hpp"
 
-#include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "nvs_flash.h"
+#include "esp_wifi.h"
 #include "esp_log.h"
 
 #include <cstring>
@@ -88,8 +89,19 @@ namespace wifi {
 
         g_event_group = xEventGroupCreateStatic(&g_event_group_buf);
 
-        TRY(esp_netif_init());
-        TRY(esp_event_loop_create_default());
+        esp_err_t ret = nvs_flash_init();
+        if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+            TRY_WITH_FUNC(nvs_flash_erase(), cleanup());
+            ret = nvs_flash_init();
+        }
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to initialize the nvs flash: %s", esp_err_to_name(ret));
+            cleanup();
+            return ret;
+        }
+
+        TRY_WITH_FUNC(esp_netif_init(), cleanup());
+        TRY_WITH_FUNC(esp_event_loop_create_default(), cleanup());
 
         g_netif = esp_netif_create_default_wifi_sta();
         if (g_netif == nullptr) {
@@ -105,9 +117,6 @@ namespace wifi {
 
         TRY_WITH_FUNC(esp_wifi_set_mode(WIFI_MODE_STA), cleanup());
         TRY_WITH_FUNC(esp_wifi_start(), cleanup());
-
-        // Deliberately not connecting here - no credentials yet until scan()+connect()
-        // are driven by the keypad UI, or until storage supplies previously saved ones.
 
         g_is_initialized = true;
         return ESP_OK;
@@ -162,8 +171,8 @@ namespace wifi {
 
         g_last_ssid.fill('\0');
         g_last_password.fill('\0');
-        std::copy(ssid.begin(), ssid.end(), g_last_ssid.begin());
-        std::copy(password.begin(), password.end(), g_last_password.begin());
+        std::ranges::copy(ssid, g_last_ssid.begin());
+        std::ranges::copy(password, g_last_password.begin());
         g_have_creds = true;
 
         xEventGroupClearBits(g_event_group, CONNECTED_BIT | FAIL_BIT);

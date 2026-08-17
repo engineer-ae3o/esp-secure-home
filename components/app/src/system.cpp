@@ -1,6 +1,3 @@
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-
 #include "telegram.hpp"
 #include "display.hpp"
 #include "storage.hpp"
