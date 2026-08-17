@@ -31,8 +31,8 @@ namespace storage {
         };
 
         struct wifi_file_data_t {
-            bool          has_creds{};
-            wifi_creds_t  creds{};
+            bool         has_creds{};
+            wifi_creds_t creds{};
         };
 
         bool g_is_initialized = false;
@@ -77,8 +77,8 @@ namespace storage {
             };
 
             TRY_WITH_FUNC(file::write(file::name_t::PSWD, {reinterpret_cast<const uint8_t*>(&pswd_data), sizeof(pswd_data)}), cleanup());
-            TRY_WITH_FUNC(
-                file::write(file::name_t::RECIPIENTS, {reinterpret_cast<const uint8_t*>(&recipients_data), sizeof(recipients_data)}), cleanup());
+            TRY_WITH_FUNC(file::write(file::name_t::RECIPIENTS, {reinterpret_cast<const uint8_t*>(&recipients_data), sizeof(recipients_data)}),
+                          cleanup());
             TRY_WITH_FUNC(file::write(file::name_t::WIFI_CREDS, {reinterpret_cast<const uint8_t*>(&wifi_data), sizeof(wifi_data)}), cleanup());
 
             cleanup();
@@ -87,8 +87,8 @@ namespace storage {
 
         file::open();
         TRY_WITH_FUNC(file::read(file::name_t::PSWD, {reinterpret_cast<uint8_t*>(&g_pswd_storage), sizeof(g_pswd_storage)}), cleanup());
-        TRY_WITH_FUNC(
-            file::read(file::name_t::RECIPIENTS, {reinterpret_cast<uint8_t*>(&g_recipients_storage), sizeof(g_recipients_storage)}), cleanup());
+        TRY_WITH_FUNC(file::read(file::name_t::RECIPIENTS, {reinterpret_cast<uint8_t*>(&g_recipients_storage), sizeof(g_recipients_storage)}),
+                      cleanup());
         TRY_WITH_FUNC(file::read(file::name_t::WIFI_CREDS, {reinterpret_cast<uint8_t*>(&g_wifi_storage), sizeof(g_wifi_storage)}), cleanup());
 
         if (g_recipients_storage.num_of_recipients > MAX_RECIPIENTS) {

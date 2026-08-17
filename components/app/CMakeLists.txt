@@ -8,5 +8,5 @@ idf_component_register(SRCS "src/file.cpp"
                        INCLUDE_DIRS "inc/"
                        REQUIRES freertos drivers esp_wifi esp_netif esp-idf-lib__i2cdev
                        esp-idf-lib__hd44780 joltwallet__littlefs esp-idf-lib__pcf8574
-                       esp_event 
+                       esp_event esp_http_client mbedtls
 )

@@ -5,6 +5,7 @@ uninitMemberVarNoCtor
 missingIncludeSystem
 unmatchedSuppression
 constVariablePointer
+redundantAssignment
 dangerousTypeCast
 unusedFunction
 missingInclude

@@ -21,8 +21,8 @@ namespace file {
 
         constexpr char DIR_NAME[] = "storage";
 
-        constexpr auto CRYPTO_DIR_PATH     = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME);
-        constexpr auto PSWD_FILE_PATH      = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME, "/", "password.txt");
+        constexpr auto CRYPTO_DIR_PATH      = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME);
+        constexpr auto PSWD_FILE_PATH       = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME, "/", "password.txt");
         constexpr auto RECIPIENTS_FILE_PATH = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME, "/", "recipients.txt");
         constexpr auto WIFI_CREDS_FILE_PATH = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME, "/", "wifi_creds.txt");
         constexpr auto SENTINEL_FILE_PATH   = utils::concat(config::FILESYSTEM_BASE_PATH, "/", "sentinel.txt");
