@@ -33,29 +33,32 @@ namespace wifi {
         StaticEventGroup_t g_event_group_buf{};
 
         // Remembered so a disconnect (AP reboot, temporary signal loss, etc.)
-        // can be auto-retried without the user re-entering anything.
+        // can be auto retried without the user re entering anything.
         ssid_t g_last_ssid{};
         pswd_t g_last_password{};
         bool   g_have_creds = false;
 
-        void do_connect() {
+        esp_err_t do_connect() {
             wifi_config_t sta_config{};
+
             std::strncpy(reinterpret_cast<char*>(sta_config.sta.ssid), g_last_ssid.data(), sizeof(sta_config.sta.ssid) - 1);
             std::strncpy(reinterpret_cast<char*>(sta_config.sta.password), g_last_password.data(), sizeof(sta_config.sta.password) - 1);
             sta_config.sta.threshold.authmode = g_last_password[0] == '\0' ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
 
-            TRY_THEN_LOG(esp_wifi_set_config(WIFI_IF_STA, &sta_config), "Failed to set WiFi station config");
-            TRY_THEN_LOG(esp_wifi_connect(), "Failed to start WiFi connect");
+            TRY(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
+            TRY(esp_wifi_connect());
+
+            return ESP_OK;
         }
 
         void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
             if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
                 xEventGroupClearBits(g_event_group, CONNECTED_BIT);
                 if (g_have_creds) {
-                    ESP_LOGW(TAG, "Disconnected from AP. Reconnecting with last known credentials");
-                    esp_wifi_connect();
+                    ESP_LOGW(TAG, "Disconnected from the AP. Reconnecting with last known credentials");
+                    TRY_THEN_LOG(esp_wifi_connect(), "Failed to start WiFi connect");
                 } else {
-                    ESP_LOGW(TAG, "Disconnected and no credentials on file. Not auto-reconnecting");
+                    ESP_LOGW(TAG, "Disconnected and no credentials on file. Not auto reconnecting");
                     xEventGroupSetBits(g_event_group, FAIL_BIT);
                 }
             } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
@@ -146,15 +149,15 @@ namespace wifi {
         constexpr wifi_scan_config_t scan_config = {};
         TRY(esp_wifi_scan_start(&scan_config, true)); // Blocking scan
 
-        uint16_t ap_num = 0;
-        TRY(esp_wifi_scan_get_ap_num(&ap_num));
+        uint16_t num_of_ap_found = 0;
+        TRY(esp_wifi_scan_get_ap_num(&num_of_ap_found));
 
         std::array<wifi_ap_record_t, MAX_SCAN_RESULTS> raw_records{};
 
-        uint16_t to_fetch = std::min<uint16_t>(ap_num, MAX_SCAN_RESULTS);
-        TRY(esp_wifi_scan_get_ap_records(&to_fetch, raw_records.data()));
+        uint16_t num_of_ap_to_get = std::min<uint16_t>(num_of_ap_found, MAX_SCAN_RESULTS);
+        TRY(esp_wifi_scan_get_ap_records(&num_of_ap_to_get, raw_records.data()));
 
-        count = to_fetch;
+        count = num_of_ap_to_get;
         for (size_t i = 0; i < count; i++) {
             std::strncpy(out[i].ssid.data(), reinterpret_cast<const char*>(raw_records[i].ssid), out[i].ssid.size() - 1);
             out[i].rssi     = raw_records[i].rssi;
@@ -175,16 +178,15 @@ namespace wifi {
 
         std::ranges::copy(ssid, g_last_ssid.begin());
         std::ranges::copy(password, g_last_password.begin());
-
         g_have_creds = true;
 
         xEventGroupClearBits(g_event_group, CONNECTED_BIT | FAIL_BIT);
-        do_connect();
+        TRY(do_connect());
 
         const EventBits_t bits = xEventGroupWaitBits(g_event_group, CONNECTED_BIT | FAIL_BIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(CONNECT_TIMEOUT_MS));
 
         if (!(bits & CONNECTED_BIT)) {
-            ESP_LOGE(TAG, "Failed to connect to \"%.*s\" within %lu ms", static_cast<int>(ssid.size()), ssid.data(), CONNECT_TIMEOUT_MS);
+            ESP_LOGE(TAG, "Failed to connect to \"%.*s\" within %lus", ssid.size(), ssid.data(), CONNECT_TIMEOUT_MS / 1000);
             g_have_creds = false; // Don't auto retry bad credentials forever
             return ESP_ERR_TIMEOUT;
         }

@@ -3,6 +3,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
+#include "wifi.hpp"
 #include "utils.hpp"
 #include "tasks.hpp"
 #include "system.hpp"
@@ -11,10 +12,9 @@
 #include "switch.hpp"
 #include "screen.hpp"
 #include "display.hpp"
-#include "telegram.hpp"
 #include "storage.hpp"
+#include "telegram.hpp"
 #include "multitap.hpp"
-#include "wifi.hpp"
 
 #include "esp_log.h"
 #include "portmacro.h"
@@ -125,17 +125,8 @@ namespace tasks {
             // Initialize the storage interface
             TRY_WITH_FUNC_VOID(storage::init(), utils::fatal());
 
-            // Initialize the display
-            TRY_WITH_FUNC_VOID(display::init(), utils::fatal());
-            TRY_WITH_FUNC_VOID(display::clear_screen(), utils::fatal());
-            TRY_WITH_FUNC_VOID(display::backlight_on(), utils::fatal());
-            TRY_WITH_FUNC_VOID(display::bootup_screen(), utils::fatal());
-
             // Bring up the WiFi radio.
             TRY_WITH_FUNC_VOID(wifi::init(), utils::fatal());
-
-            // Register a shutdown handler to get called before any reboot
-            TRY_WITH_FUNC_VOID(esp_register_shutdown_handler(deinit_all), utils::fatal());
 
             // Initialize the gpio isr service
             TRY_WITH_FUNC_VOID(gpio_install_isr_service(ESP_INTR_FLAG_LEVEL1), utils::fatal());
@@ -147,6 +138,15 @@ namespace tasks {
                 utils::fatal();
             }
 
+            // Initialize the display
+            TRY_WITH_FUNC_VOID(display::init(), utils::fatal());
+            TRY_WITH_FUNC_VOID(display::clear_screen(), utils::fatal());
+            TRY_WITH_FUNC_VOID(display::backlight_on(), utils::fatal());
+            TRY_WITH_FUNC_VOID(display::bootup_screen(), utils::fatal());
+
+            // Register a shutdown handler to get called before any reboot
+            TRY_WITH_FUNC_VOID(esp_register_shutdown_handler(deinit_all), utils::fatal());
+
             ESP_LOGI("Init", "Done initializing all components");
         }
 
@@ -155,15 +155,15 @@ namespace tasks {
         // Keypad layout is a standard 4x4 (digits 0-9, A-D, *, #). A-D/*/# are reserved
         // as control keys:
         //
-        //   A       - OK / confirm / select
-        //   B       - backspace (delete last typed char)
-        //   C       - scroll up / previous item  (in WIFI_PW_ENTRY: toggle upper/lowercase instead)
-        //   D       - scroll down / next item
-        //   *       - cancel current entry / go back one level
-        //   #       - logout: return to the password prompt from anywhere in admin mode
+        //   A: OK / confirm / select
+        //   B: backspace (delete last typed char)
+        //   C: scroll up / previous item  (in WIFI_PW_ENTRY: toggle upper/lowercase instead)
+        //   D: scroll down / next item
+        //   *: cancel current entry / go back one level
+        //   #: logout: return to the password prompt from anywhere in admin mode
         //
         // Everything except WiFi passwords is digits-only as far as user entry goes
-        // (admin password, Telegram chat IDs). WiFi passwords use multi-tap text entry
+        // (admin password, Telegram chat IDs). WiFi passwords use multi tap text entry
         // (see multitap.hpp) since real WPA2 passwords need letters/symbols the keypad
         // has no dedicated keys for.
         enum class ui_state_t : uint8_t {
@@ -864,13 +864,13 @@ namespace tasks {
                 if (reed_switch_broken) {
                     const auto& reed_broken_request = g_admin_mode ? reed_switch_broken_admin : reed_switch_broken_no_admin;
                     xQueueSend(g_display_queue, &reed_broken_request, portMAX_DELAY);
-                    sys::on_reed_switch_break(g_admin_mode);
+                    sys::alert_on_reed_switch_break(g_admin_mode);
                 }
 
                 if (tamper_switch_broken) {
                     const auto& tamper_broken_request = g_admin_mode ? tamper_switch_broken_admin : tamper_switch_broken_no_admin;
                     xQueueSend(g_display_queue, &tamper_broken_request, portMAX_DELAY);
-                    sys::on_tamper_switch_break(g_admin_mode);
+                    sys::alert_on_tamper_switch_break(g_admin_mode);
                 }
             }
         }

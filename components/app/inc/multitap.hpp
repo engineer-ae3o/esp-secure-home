@@ -15,22 +15,22 @@ namespace multitap {
     constexpr inline uint32_t TIMEOUT_MS = 700;
 
     // Character sets per digit key. Deliberately excludes most symbols beyond
-    // what's on key '1' - the 4x4 keypad has no room to cover the full WPA2
+    // what's on key '1'. The 4x4 keypad has no room to cover the full WPA2
     // symbol range. Covers lowercase letters, digits, space, and a handful of
     // common punctuation. Uppercase is handled separately via a case toggle,
-    // not baked into the cycle sets.
-    constexpr inline std::array<char, 2> KEY_0 = {' ', '0'};
-    constexpr inline std::array<char, 5> KEY_1 = {'.', ',', '-', '_', '1'};
-    constexpr inline std::array<char, 4> KEY_2 = {'a', 'b', 'c', '2'};
-    constexpr inline std::array<char, 4> KEY_3 = {'d', 'e', 'f', '3'};
-    constexpr inline std::array<char, 4> KEY_4 = {'g', 'h', 'i', '4'};
-    constexpr inline std::array<char, 4> KEY_5 = {'j', 'k', 'l', '5'};
-    constexpr inline std::array<char, 4> KEY_6 = {'m', 'n', 'o', '6'};
-    constexpr inline std::array<char, 5> KEY_7 = {'p', 'q', 'r', 's', '7'};
-    constexpr inline std::array<char, 4> KEY_8 = {'t', 'u', 'v', '8'};
-    constexpr inline std::array<char, 5> KEY_9 = {'w', 'x', 'y', 'z', '9'};
+    // not baked into the cycle sets.std::array<char, 2>
+    constexpr inline auto KEY_0 = std::array{' ', '0'};
+    constexpr inline auto KEY_1 = std::array{'.', ',', '-', '_', '1'};
+    constexpr inline auto KEY_2 = std::array{'a', 'b', 'c', '2'};
+    constexpr inline auto KEY_3 = std::array{'d', 'e', 'f', '3'};
+    constexpr inline auto KEY_4 = std::array{'g', 'h', 'i', '4'};
+    constexpr inline auto KEY_5 = std::array{'j', 'k', 'l', '5'};
+    constexpr inline auto KEY_6 = std::array{'m', 'n', 'o', '6'};
+    constexpr inline auto KEY_7 = std::array{'p', 'q', 'r', 's', '7'};
+    constexpr inline auto KEY_8 = std::array{'t', 'u', 'v', '8'};
+    constexpr inline auto KEY_9 = std::array{'w', 'x', 'y', 'z', '9'};
 
-    // Returns the char at `cycle_idx` (wrapped) for the given digit key, or
+    // Returns the char at cycle_idx (wrapped) for the given digit key, or
     // '\0' if the key isn't one of the digit keys this engine handles.
     constexpr char char_for(char key, uint8_t cycle_idx) {
         switch (key) {
@@ -59,9 +59,8 @@ namespace multitap {
         }
     }
 
-    // Tracks in-progress multi-tap state for a single text entry field. Owned
-    // by whichever ui_state_t is doing text entry (e.g. WIFI_PW_ENTRY);
-    // reset when entering/leaving that state.
+    // Tracks in progress multi tap state for a single text entry field.
+    // Owned by whichever ui_state_t is doing text entry.
     struct session_t {
         char       last_key{};
         bool       pending{}; // true if the last char is still "live"/cyclable
@@ -73,7 +72,7 @@ namespace multitap {
             *this = {};
         }
 
-        // Call when a digit key is pressed. `buf`/`len` is the text buffer being
+        // Call when a digit key is pressed. buf/len is the text buffer being
         // built; this either overwrites the last (still pending) char or appends
         // a new one. Returns false if the buffer is full and the press was dropped.
         template<size_t N>

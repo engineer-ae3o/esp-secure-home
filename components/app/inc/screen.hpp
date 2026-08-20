@@ -51,14 +51,13 @@ namespace {
         std::array<char, config::LCD_COLUMNS> line1{};
     };
 
-    // Builds a display line of exactly LCD_COLUMNS characters: copies in as much of
-    // `text` as fits and space pads the rest, so the display task never has to think
-    // about padding/truncation itself.
+    // Builds a display line of exactly LCD_COLUMNS characters.
+    // It copies in as much of text as fits and space pads the rest.
     constexpr std::array<char, config::LCD_COLUMNS> make_line(std::string_view text) {
         std::array<char, config::LCD_COLUMNS> line{};
         line.fill(' ');
         const size_t len = std::min<size_t>(text.size(), config::LCD_COLUMNS);
-        for (size_t i = 0; i < len; ++i) {
+        for (size_t i = 0; i < len; i++) {
             line[i] = text[i];
         }
         return line;
@@ -66,14 +65,14 @@ namespace {
 
     // Builds a display request carrying free form text rather than a canned screen_type.
     constexpr display_request_t
-    make_custom_request(std::string_view line0_text, std::string_view line1_text, bool return_to_prev = false, uint16_t duration_ms = 0) {
+    make_custom_request(std::string_view line0, std::string_view line1, bool return_to_prev = false, uint16_t duration_ms = 0) {
         return {
             .return_to_prev  = return_to_prev,
             .use_custom_text = true,
-            .screen_type     = screen_t::PASSWORD_REQUEST, // unused: use_custom_text takes priority
+            .screen_type     = screen_t::PASSWORD_REQUEST, // This is unused as use_custom_text takes priority
             .duration_ms     = duration_ms,
-            .line0           = make_line(line0_text),
-            .line1           = make_line(line1_text),
+            .line0           = make_line(line0),
+            .line1           = make_line(line1),
         };
     }
 

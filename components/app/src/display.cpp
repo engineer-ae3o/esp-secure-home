@@ -103,7 +103,7 @@ namespace display {
         TRY(hd44780_gotoxy(&g_hd44780_config, 0, line));
 
         // Write whitespaces to clear all characters
-        for (uint32_t i = 0; i < config::LCD_COLUMNS; ++i) {
+        for (uint32_t i = 0; i < config::LCD_COLUMNS; i++) {
             TRY(hd44780_putc(&g_hd44780_config, ' '));
         }
 
@@ -154,7 +154,7 @@ namespace display {
 
         if (pad_to_whitespace) {
             const size_t pad_count = config::LCD_COLUMNS - msg.length();
-            for (size_t i = 0; i < pad_count; ++i) {
+            for (size_t i = 0; i < pad_count; i++) {
                 TRY(hd44780_putc(&g_hd44780_config, ' '));
             }
         }

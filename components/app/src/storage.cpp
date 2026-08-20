@@ -1,6 +1,5 @@
-#include "storage.hpp"
-#include "esp_err.h"
 #include "telegram.hpp"
+#include "storage.hpp"
 #include "utils.hpp"
 #include "file.hpp"
 
@@ -8,7 +7,6 @@
 #include <cstring>
 #include <optional>
 #include <algorithm>
-#include <type_traits>
 #include <string_view>
 
 
@@ -39,8 +37,8 @@ namespace storage {
 
         // Storage for the data being stored in the files at runtime
         pswd_file_data_t       g_pswd_storage{};
-        recipients_file_data_t g_recipients_storage{};
         wifi_file_data_t       g_wifi_storage{};
+        recipients_file_data_t g_recipients_storage{};
 
         // Helpers
         void cleanup() {
@@ -143,6 +141,7 @@ namespace storage {
         }
 
         if (auto ret = file::write(file::name_t::PSWD, {reinterpret_cast<const uint8_t*>(&g_pswd_storage), sizeof(g_pswd_storage)}); ret != ESP_OK) {
+            // Go back to the old password if the write to the file failed
             g_pswd_storage.pswd = old_pswd;
             return ret;
         }
@@ -165,12 +164,14 @@ namespace storage {
 
         auto& [num_of_recipients, recipients] = g_recipients_storage;
 
+        // Check if the ID to add already is already stored
         for (size_t i = 0; i < num_of_recipients; i++) {
             if (std::string_view{recipients[i].data(), recipients[i].size()} == chat_id_to_add) {
                 return ESP_ERR_INVALID_STATE;
             }
         }
 
+        // Store the new ID at the end of the file
         for (size_t i = 0; i < telegram::CHAT_ID_LEN; i++) {
             recipients[num_of_recipients][i] = chat_id_to_add[i];
         }
@@ -178,8 +179,9 @@ namespace storage {
 
         if (auto ret = file::write(file::name_t::RECIPIENTS, {reinterpret_cast<const uint8_t*>(&g_recipients_storage), sizeof(g_recipients_storage)});
             ret != ESP_OK) {
+            // Remove this newly added recepient if the write to the file failed
             num_of_recipients--;
-            recipients[num_of_recipients] = {};
+            recipients[num_of_recipients].fill('\0');
             return ret;
         }
 
@@ -201,6 +203,7 @@ namespace storage {
 
         auto& [num_of_recipients, recipients] = g_recipients_storage;
 
+        // Find the index of the recepient to be removed
         size_t target_idx = num_of_recipients;
         for (size_t i = 0; i < num_of_recipients; i++) {
             if (std::string_view{recipients[i].data(), recipients[i].size()} == chat_id_to_rm) {
@@ -208,21 +211,25 @@ namespace storage {
                 break;
             }
         }
-        if (target_idx == num_of_recipients) {
+        if (target_idx >= num_of_recipients) {
             return ESP_ERR_NOT_FOUND;
         }
 
+        // Backup the storage incase the write to the file failed since the target was found
         const auto backup_storage = g_recipients_storage;
 
-        for (size_t i = target_idx; i < num_of_recipients - 1; ++i) {
+        // Move the elements that appear after the target index up by one place to overwrite the target
+        for (size_t i = target_idx; i < num_of_recipients - 1; i++) {
             recipients[i] = recipients[i + 1];
         }
 
+        // Clear out the last position
         recipients[num_of_recipients - 1] = {};
         num_of_recipients--;
 
         if (auto ret = file::write(file::name_t::RECIPIENTS, {reinterpret_cast<const uint8_t*>(&g_recipients_storage), sizeof(g_recipients_storage)});
             ret != ESP_OK) {
+            // Leave the recepient added back in if the write to the file failed
             g_recipients_storage = backup_storage;
             return ret;
         }
@@ -242,20 +249,24 @@ namespace storage {
             return ESP_ERR_INVALID_STATE;
         }
 
-        if (ssid.empty() || ssid.length() > wifi::SSID_LEN || password.length() > wifi::PASSWORD_MAX_LEN) {
+        if (ssid.empty() || ssid.length() > wifi::SSID_LEN || password.empty() || password.length() > wifi::PASSWORD_MAX_LEN) {
             return ESP_ERR_INVALID_ARG;
         }
 
+        // Backup the old storage to rollback to if the write to flash failed
         const auto backup = g_wifi_storage;
 
         g_wifi_storage.creds.ssid.fill('\0');
         g_wifi_storage.creds.password.fill('\0');
-        std::copy(ssid.begin(), ssid.end(), g_wifi_storage.creds.ssid.begin());
-        std::copy(password.begin(), password.end(), g_wifi_storage.creds.password.begin());
+
+        std::ranges::copy(ssid, g_wifi_storage.creds.ssid.begin());
+        std::ranges::copy(password, g_wifi_storage.creds.password.begin());
+
         g_wifi_storage.has_creds = true;
 
         if (auto ret = file::write(file::name_t::WIFI_CREDS, {reinterpret_cast<const uint8_t*>(&g_wifi_storage), sizeof(g_wifi_storage)});
             ret != ESP_OK) {
+            // Go back to previously stored credentials if the write to the file failed
             g_wifi_storage = backup;
             return ret;
         }

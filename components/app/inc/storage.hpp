@@ -40,10 +40,10 @@ namespace storage {
 
     [[nodiscard]] esp_err_t rm_recipient(std::string_view chat_id_to_rm);
 
+    [[nodiscard]] std::optional<std::span<recipient_t>> get_recipients();
+
     [[nodiscard]] esp_err_t set_wifi_creds(std::string_view ssid, std::string_view password);
 
     [[nodiscard]] std::optional<wifi_creds_t> get_wifi_creds();
-
-    [[nodiscard]] std::optional<std::span<recipient_t>> get_recipients();
 
 } // namespace storage

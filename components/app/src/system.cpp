@@ -57,7 +57,7 @@ namespace sys {
         }
     }
 
-    void on_reed_switch_break(bool is_admin_mode) {
+    void alert_on_reed_switch_break(bool is_admin_mode) {
         if (is_admin_mode) {
             // Just log in admin mode since this is not a security breach
             ESP_LOGI(TAG, "Door opened in admin mode");
@@ -68,7 +68,7 @@ namespace sys {
         }
     }
 
-    void on_tamper_switch_break(bool is_admin_mode) {
+    void alert_on_tamper_switch_break(bool is_admin_mode) {
         if (is_admin_mode) {
             // Just log in admin mode since this is not a security breach
             ESP_LOGW(TAG, "The control box is being tampered with");

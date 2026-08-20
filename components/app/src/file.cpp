@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+
 namespace file {
 
     namespace {
@@ -21,11 +22,12 @@ namespace file {
 
         constexpr char DIR_NAME[] = "storage";
 
-        constexpr auto STORAGE_DIR_PATH     = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME);
+        constexpr auto STORAGE_DIR_PATH   = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME);
+        constexpr auto SENTINEL_FILE_PATH = utils::concat(config::FILESYSTEM_BASE_PATH, "/", "sentinel.txt");
+
         constexpr auto PSWD_FILE_PATH       = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME, "/", "password.txt");
         constexpr auto RECIPIENTS_FILE_PATH = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME, "/", "recipients.txt");
         constexpr auto WIFI_CREDS_FILE_PATH = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME, "/", "wifi_creds.txt");
-        constexpr auto SENTINEL_FILE_PATH   = utils::concat(config::FILESYSTEM_BASE_PATH, "/", "sentinel.txt");
 
         FILE* g_pswd_file{};
         FILE* g_recipients_file{};
