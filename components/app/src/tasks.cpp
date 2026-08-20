@@ -131,24 +131,8 @@ namespace tasks {
             TRY_WITH_FUNC_VOID(display::backlight_on(), utils::fatal());
             TRY_WITH_FUNC_VOID(display::bootup_screen(), utils::fatal());
 
-            // Bring up the WiFi radio (no connection attempted yet - just init).
+            // Bring up the WiFi radio.
             TRY_WITH_FUNC_VOID(wifi::init(), utils::fatal());
-
-            // If we have credentials saved from a previous "WiFi setup" session, try them now.
-            // Not fatal on failure - the device is still fully usable locally (keypad, LCD,
-            // switches), and the admin menu's "WiFi setup" lets this be fixed without a re-flash.
-            if (auto creds = storage::get_wifi_creds(); creds.has_value()) {
-                const size_t ssid_len = std::strlen(creds->ssid.data());
-                const size_t pw_len   = std::strlen(creds->password.data());
-
-                ESP_LOGI("Init", "Found saved WiFi credentials for \"%.*s\". Attempting to connect", static_cast<int>(ssid_len), creds->ssid.data());
-
-                if (auto ret = wifi::connect({creds->ssid.data(), ssid_len}, {creds->password.data(), pw_len}); ret != ESP_OK) {
-                    ESP_LOGW("Init", "Failed to connect to saved WiFi on boot: %s", esp_err_to_name(ret));
-                }
-            } else {
-                ESP_LOGW("Init", "No saved WiFi credentials. Use the admin menu's \"WiFi setup\" to configure one");
-            }
 
             // Register a shutdown handler to get called before any reboot
             TRY_WITH_FUNC_VOID(esp_register_shutdown_handler(deinit_all), utils::fatal());
@@ -156,7 +140,7 @@ namespace tasks {
             // Initialize the gpio isr service
             TRY_WITH_FUNC_VOID(gpio_install_isr_service(ESP_INTR_FLAG_LEVEL1), utils::fatal());
 
-            // Create the display queue with a size of 16 elements to hold as many display requests as possible
+            // Create the display queue with a size of 32 to hold as many display requests as possible
             g_display_queue = xQueueCreate(32, sizeof(display_request_t));
             if (g_display_queue == nullptr) {
                 ESP_LOGE(TAG, "Failed to create the display queue");
@@ -894,6 +878,22 @@ namespace tasks {
         [[noreturn]] void wifi_task(void* arg) {
             constexpr const char* TAG = "WiFi_task";
             ESP_LOGI(TAG, "WiFi_task started");
+
+            // If we have credentials saved from a previous "WiFi setup" session, try them now.
+            // Not fatal on failure - the device is still fully usable locally (keypad, LCD,
+            // switches), and the admin menu's "WiFi setup" lets this be fixed without a re-flash.
+            if (auto creds = storage::get_wifi_creds(); creds.has_value()) {
+                const size_t ssid_len = std::strlen(creds->ssid.data());
+                const size_t pw_len   = std::strlen(creds->password.data());
+
+                ESP_LOGI("Init", "Found saved WiFi credentials for \"%.*s\". Attempting to connect", static_cast<int>(ssid_len), creds->ssid.data());
+
+                if (auto ret = wifi::connect({creds->ssid.data(), ssid_len}, {creds->password.data(), pw_len}); ret != ESP_OK) {
+                    ESP_LOGW("Init", "Failed to connect to saved WiFi on boot: %s", esp_err_to_name(ret));
+                }
+            } else {
+                ESP_LOGW("Init", "No saved WiFi credentials. Use the admin menu's \"WiFi setup\" to configure one");
+            }
 
             // wifi::init() and the initial connect attempt (if credentials were saved)
             // already happened in init_all() before any task was created. This task just

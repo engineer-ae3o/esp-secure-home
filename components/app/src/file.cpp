@@ -21,7 +21,7 @@ namespace file {
 
         constexpr char DIR_NAME[] = "storage";
 
-        constexpr auto CRYPTO_DIR_PATH      = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME);
+        constexpr auto STORAGE_DIR_PATH     = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME);
         constexpr auto PSWD_FILE_PATH       = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME, "/", "password.txt");
         constexpr auto RECIPIENTS_FILE_PATH = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME, "/", "recipients.txt");
         constexpr auto WIFI_CREDS_FILE_PATH = utils::concat(config::FILESYSTEM_BASE_PATH, "/", DIR_NAME, "/", "wifi_creds.txt");
@@ -138,15 +138,15 @@ namespace file {
     void create() {
         // NOLINTBEGIN(cppcoreguidelines-owning-memory)
 
-        if (mkdir(CRYPTO_DIR_PATH.data(), 0755) != 0 && errno != EEXIST) {
-            ESP_LOGE(TAG, "Failed to create directory %s: %s", CRYPTO_DIR_PATH.data(), strerror(errno));
+        if (mkdir(STORAGE_DIR_PATH.data(), 0755) != 0 && errno != EEXIST) {
+            ESP_LOGE(TAG, "Failed to create directory %s: %s", STORAGE_DIR_PATH.data(), strerror(errno));
             utils::fatal();
         }
 
         g_pswd_file = fopen(PSWD_FILE_PATH.data(), "wb+");
         if (g_pswd_file == nullptr) {
             ESP_LOGE(TAG, "Failed to create %s: %s", PSWD_FILE_PATH.data(), strerror(errno));
-            rmdir(CRYPTO_DIR_PATH.data());
+            rmdir(STORAGE_DIR_PATH.data());
             utils::fatal();
         }
 
@@ -156,7 +156,7 @@ namespace file {
             fclose(g_pswd_file);
             g_pswd_file = nullptr;
             remove(PSWD_FILE_PATH.data());
-            rmdir(CRYPTO_DIR_PATH.data());
+            rmdir(STORAGE_DIR_PATH.data());
             utils::fatal();
         }
 
@@ -169,7 +169,7 @@ namespace file {
             g_recipients_file = nullptr;
             remove(PSWD_FILE_PATH.data());
             remove(RECIPIENTS_FILE_PATH.data());
-            rmdir(CRYPTO_DIR_PATH.data());
+            rmdir(STORAGE_DIR_PATH.data());
             utils::fatal();
         }
 

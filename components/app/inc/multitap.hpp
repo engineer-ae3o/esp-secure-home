@@ -64,9 +64,9 @@ namespace multitap {
     // reset when entering/leaving that state.
     struct session_t {
         char       last_key{};
-        uint8_t    cycle_idx{};
         bool       pending{}; // true if the last char is still "live"/cyclable
         bool       caps_active{};
+        uint8_t    cycle_idx{};
         TickType_t last_press_tick{};
 
         void reset() {
@@ -74,7 +74,7 @@ namespace multitap {
         }
 
         // Call when a digit key is pressed. `buf`/`len` is the text buffer being
-        // built; this either overwrites the last (still-pending) char or appends
+        // built; this either overwrites the last (still pending) char or appends
         // a new one. Returns false if the buffer is full and the press was dropped.
         template<size_t N>
         [[nodiscard]] bool on_digit(char key, std::array<char, N>& buf, size_t& len) {
@@ -116,14 +116,14 @@ namespace multitap {
         }
 
         // Toggles case for future characters. If a char is currently pending,
-        // re-cases it in place too, without moving the cycle position.
+        // recases it in place too, without moving the cycle position.
         template<size_t N>
         void toggle_caps(std::array<char, N>& buf, size_t len) {
             caps_active = !caps_active;
             if (pending && len > 0) {
                 char& c = buf[len - 1];
-                c       = caps_active ? static_cast<char>(std::toupper(static_cast<unsigned char>(c)))
-                                      : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+                c = caps_active ? static_cast<char>(std::toupper(c)) : static_cast<char>(std::tolower(c));
             }
         }
 

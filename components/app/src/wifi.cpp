@@ -1,8 +1,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 
-#include "wifi.hpp"
 #include "utils.hpp"
+#include "wifi.hpp"
 
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -34,9 +34,9 @@ namespace wifi {
 
         // Remembered so a disconnect (AP reboot, temporary signal loss, etc.)
         // can be auto-retried without the user re-entering anything.
-        std::array<char, SSID_LEN + 1>         g_last_ssid{};
-        std::array<char, PASSWORD_MAX_LEN + 1> g_last_password{};
-        bool                                   g_have_creds = false;
+        ssid_t g_last_ssid{};
+        pswd_t g_last_password{};
+        bool   g_have_creds = false;
 
         void do_connect() {
             wifi_config_t sta_config{};
@@ -48,7 +48,7 @@ namespace wifi {
             TRY_THEN_LOG(esp_wifi_connect(), "Failed to start WiFi connect");
         }
 
-        void event_handler(void* /*arg*/, esp_event_base_t event_base, int32_t event_id, void* /*event_data*/) {
+        void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
             if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
                 xEventGroupClearBits(g_event_group, CONNECTED_BIT);
                 if (g_have_creds) {
@@ -135,7 +135,7 @@ namespace wifi {
         if (!g_is_initialized || !g_event_group) {
             return false;
         }
-        return (xEventGroupGetBits(g_event_group) & CONNECTED_BIT) != 0;
+        return xEventGroupGetBits(g_event_group) & CONNECTED_BIT;
     }
 
     esp_err_t scan(std::array<ap_info_t, MAX_SCAN_RESULTS>& out, size_t& count) {
@@ -150,7 +150,8 @@ namespace wifi {
         TRY(esp_wifi_scan_get_ap_num(&ap_num));
 
         std::array<wifi_ap_record_t, MAX_SCAN_RESULTS> raw_records{};
-        uint16_t                                       to_fetch = std::min<uint16_t>(ap_num, MAX_SCAN_RESULTS);
+
+        uint16_t to_fetch = std::min<uint16_t>(ap_num, MAX_SCAN_RESULTS);
         TRY(esp_wifi_scan_get_ap_records(&to_fetch, raw_records.data()));
 
         count = to_fetch;
@@ -171,8 +172,10 @@ namespace wifi {
 
         g_last_ssid.fill('\0');
         g_last_password.fill('\0');
+
         std::ranges::copy(ssid, g_last_ssid.begin());
         std::ranges::copy(password, g_last_password.begin());
+
         g_have_creds = true;
 
         xEventGroupClearBits(g_event_group, CONNECTED_BIT | FAIL_BIT);
@@ -182,7 +185,7 @@ namespace wifi {
 
         if (!(bits & CONNECTED_BIT)) {
             ESP_LOGE(TAG, "Failed to connect to \"%.*s\" within %lu ms", static_cast<int>(ssid.size()), ssid.data(), CONNECT_TIMEOUT_MS);
-            g_have_creds = false; // Don't auto-retry bad credentials forever
+            g_have_creds = false; // Don't auto retry bad credentials forever
             return ESP_ERR_TIMEOUT;
         }
 

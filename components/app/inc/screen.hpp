@@ -17,7 +17,7 @@ namespace {
 
     // This file provides a bunch of helper utilities for the system and display tasks
 
-    // The canned (static, pre authored) display screens. Anything whose text is known
+    // The canned (static and pre authored) display screens. Anything whose text is known
     // up front lives here. Anything data dependent (menus, typed digits, phone number
     // lists, etc.) is sent as free form text instead see make_custom_request() below.
     enum class screen_t : uint8_t {
@@ -39,8 +39,7 @@ namespace {
     // If use_custom_text is set, line0/line1 are shown verbatim instead of looking
     // screen_type up in SCREEN_MAP_LUT. This is how the interactive (keypad driven) UI
     // menus, typed digits, phone number lists, feedback messages gets rendered, while
-    // still going through the same single queue/single writer path as the canned alerts
-    // below, so nothing ever races on the LCD.
+    // still going through the same single queue/single writer path as the canned alerts.
     struct display_request_t {
         bool return_to_prev{};
         bool use_custom_text{};

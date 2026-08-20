@@ -17,7 +17,8 @@ namespace telegram {
 
         constexpr const char* TAG = "Telegram";
 
-        constexpr uint32_t HTTP_TIMEOUT_MS = 10 * 1000;
+        constexpr uint32_t HTTP_TIMEOUT_MS   = 10 * 1000;
+        constexpr uint32_t HTTP_SUCCESS_CODE = 200;
 
     } // namespace
 
@@ -27,25 +28,18 @@ namespace telegram {
         }
 
         // Build the request URL: https://api.telegram.org/bot<TOKEN>/sendMessage
-        std::array<char, 256> url{};
-        const int             url_len =
-            snprintf(url.data(), url.size(), "https://api.telegram.org/bot%s/sendMessage", static_cast<const char*>(config::TELEGRAM_BOT_TOKEN));
-        if (url_len <= 0 || static_cast<size_t>(url_len) >= url.size()) {
-            ESP_LOGE(TAG, "Failed to build the Telegram request URL");
-            return ESP_ERR_INVALID_SIZE;
-        }
+        constexpr auto url = utils::concat("https://api.telegram.org/bot", config::TELEGRAM_BOT_TOKEN, "/sendMessage");
 
-        // Build the JSON body. NOTE: this assumes msg never contains " or \ (true for all
-        // the canned alert strings this project sends). If you ever pass free-form/user-typed
-        // text through here, escape it first or this will produce invalid JSON.
+        // Build the JSON body.
         std::array<char, MAX_MSG_LEN + 128> body{};
-        const int                           body_len = snprintf(body.data(),
-                                                                body.size(),
-                                                                R"({"chat_id":"%.*s","text":"%.*s"})",
-                                                                static_cast<int>(chat_id.size()),
-                                                                chat_id.data(),
-                                                                static_cast<int>(msg.size()),
-                                                                msg.data());
+
+        const int body_len = snprintf(body.data(),
+                                      body.size(),
+                                      R"({"chat_id":"%.*s","text":"%.*s"})",
+                                      static_cast<int>(chat_id.size()),
+                                      chat_id.data(),
+                                      static_cast<int>(msg.size()),
+                                      msg.data());
         if (body_len <= 0 || static_cast<size_t>(body_len) >= body.size()) {
             ESP_LOGE(TAG, "Failed to build the Telegram request body");
             return ESP_ERR_INVALID_SIZE;
@@ -55,7 +49,7 @@ namespace telegram {
         http_config.url                      = url.data();
         http_config.method                   = HTTP_METHOD_POST;
         http_config.timeout_ms               = HTTP_TIMEOUT_MS;
-        http_config.crt_bundle_attach        = esp_crt_bundle_attach; // Built-in CA bundle. No manual cert management needed.
+        http_config.crt_bundle_attach        = esp_crt_bundle_attach;
 
         esp_http_client_handle_t client = esp_http_client_init(&http_config);
         if (client == nullptr) {
@@ -76,7 +70,7 @@ namespace telegram {
         const int status = esp_http_client_get_status_code(client);
         esp_http_client_cleanup(client);
 
-        if (status != 200) {
+        if (status != HTTP_SUCCESS_CODE) {
             ESP_LOGE(TAG, "Telegram API returned HTTP status %d", status);
             return ESP_FAIL;
         }

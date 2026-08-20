@@ -21,6 +21,13 @@ namespace storage {
     using recipient_t  = std::array<char, telegram::CHAT_ID_LEN>;
     using recipients_t = std::array<recipient_t, MAX_RECIPIENTS>;
 
+    // WiFi credentials. Persisted so the password entry only has
+    // to happen once per network change, not on every boot.
+    struct wifi_creds_t {
+        wifi::ssid_t ssid{};
+        wifi::pswd_t password{};
+    };
+
     [[nodiscard]] esp_err_t init();
 
     [[nodiscard]] esp_err_t deinit();
@@ -33,17 +40,10 @@ namespace storage {
 
     [[nodiscard]] esp_err_t rm_recipient(std::string_view chat_id_to_rm);
 
-    [[nodiscard]] std::optional<std::span<recipient_t>> get_recipients();
-
-    // WiFi credentials - persisted so the multi-tap password entry only has
-    // to happen once per network change, not on every boot.
-    struct wifi_creds_t {
-        std::array<char, wifi::SSID_LEN + 1>         ssid{};
-        std::array<char, wifi::PASSWORD_MAX_LEN + 1> password{};
-    };
-
     [[nodiscard]] esp_err_t set_wifi_creds(std::string_view ssid, std::string_view password);
 
     [[nodiscard]] std::optional<wifi_creds_t> get_wifi_creds();
+
+    [[nodiscard]] std::optional<std::span<recipient_t>> get_recipients();
 
 } // namespace storage
