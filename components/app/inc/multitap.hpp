@@ -34,7 +34,7 @@ namespace multitap {
 
     // Returns the char at m_cycle_idx (wrapped) for the given digit key, or
     // '\0' if the key isn't one of the digit keys this engine handles.
-    constexpr char char_for(char key, uint8_t cycle_idx) {
+    constexpr unsigned char char_for(char key, uint8_t cycle_idx) {
         switch (key) {
             case '0':
                 return KEY_0[cycle_idx % KEY_0.size()];
@@ -123,7 +123,8 @@ namespace multitap {
             m_caps_lock = !m_caps_lock;
             if (m_last_char_pending && len > 0) {
                 // Make the last character in the buffer uppercase or lowercase depending on m_caps_lock
-                buf[len - 1] = m_caps_lock ? static_cast<char>(std::toupper(buf[len - 1])) : static_cast<char>(std::tolower(buf[len - 1]));
+                const unsigned char c = buf[len - 1];
+                buf[len - 1]          = m_caps_lock ? static_cast<char>(std::toupper(c)) : static_cast<char>(std::tolower(c));
             }
         }
 

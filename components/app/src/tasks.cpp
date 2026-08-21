@@ -15,6 +15,7 @@
 #include "storage.hpp"
 #include "telegram.hpp"
 #include "multitap.hpp"
+#include "ui_helpers.hpp"
 
 #include "esp_log.h"
 #include "portmacro.h"
@@ -52,13 +53,9 @@ namespace tasks {
             // We use the shutdown screen here directly. This is safe as no other thread is actively using or driving it
             TRY_THEN_LOG(display::shutdown_screen(), "Failed to display the power down screen");
             TRY_THEN_LOG(display::deinit(), "Failed to deinitialize the display");
+            ui::deinit();
 
             TRY_THEN_LOG(esp_vfs_littlefs_unregister(static_cast<const char*>(config::FILESYSTEM_PARTITION_LABEL)), "Failed to unmount filesystem");
-
-            if (g_display_queue) {
-                vQueueDelete(g_display_queue);
-                g_display_queue = nullptr;
-            }
 
             ESP_LOGI("Info", "Resources cleaned up");
         }
@@ -132,11 +129,7 @@ namespace tasks {
             TRY_WITH_FUNC_VOID(gpio_install_isr_service(ESP_INTR_FLAG_LEVEL1), utils::fatal());
 
             // Create the display queue with a size of 32 to hold as many display requests as possible
-            g_display_queue = xQueueCreate(32, sizeof(display_request_t));
-            if (g_display_queue == nullptr) {
-                ESP_LOGE(TAG, "Failed to create the display queue");
-                utils::fatal();
-            }
+            g_display_queue = ui::init(32);
 
             // Initialize the display
             TRY_WITH_FUNC_VOID(display::init(), utils::fatal());
@@ -150,771 +143,683 @@ namespace tasks {
             ESP_LOGI("Init", "Done initializing all components");
         }
 
-        // Keypad UI / admin mode state machine
-        //
-        // Keypad layout is a standard 4x4 (digits 0-9, A-D, *, #). A-D/*/# are reserved
-        // as control keys:
-        //
-        //   A: OK / confirm / select
-        //   B: backspace (delete last typed char)
-        //   C: scroll up / previous item  (in WIFI_PW_ENTRY: toggle upper/lowercase instead)
-        //   D: scroll down / next item
-        //   *: cancel current entry / go back one level
-        //   #: logout: return to the password prompt from anywhere in admin mode
-        //
-        // Everything except WiFi passwords is digits-only as far as user entry goes
-        // (admin password, Telegram chat IDs). WiFi passwords use multi tap text entry
-        // (see multitap.hpp) since real WPA2 passwords need letters/symbols the keypad
-        // has no dedicated keys for.
-        enum class ui_state_t : uint8_t {
-            AWAITING_PASSWORD, // Default/locked state. User is typing the admin password.
-            LOCKED_OUT,        // Too many failed attempts. Ignoring input until the lockout expires.
-            ADMIN_MENU,        // Top level admin menu.
-            VIEW_NUMBERS,      // Scrolling through the registered Telegram recipients (read only).
-            ADD_NUMBER,        // Typing a new recipient's chat ID to register.
-            RM_NUMBER,         // Scrolling through registered recipients to pick one to remove.
-            CHANGE_PW_NEW,     // Typing the new password.
-            CHANGE_PW_CONFIRM, // Re-typing the new password to confirm it.
-            WIFI_SCANNING,     // Transient. Shows "Scanning..." while wifi::scan() runs.
-            WIFI_LIST,         // Scrolling through found networks to pick one.
-            WIFI_PW_ENTRY,     // Multi-tap password entry for the selected network.
-            WIFI_CONNECTING,   // Transient. Shows "Connecting..." while wifi::connect() runs.
-        };
+        namespace tasks {
 
-        constexpr std::array<std::string_view, 5> ADMIN_MENU_ITEMS = {
-            "View numbers",
-            "Add number",
-            "Remove number",
-            "Change password",
-            "WiFi setup",
-        };
+            [[noreturn]] void system(void* arg) {
+                constexpr const char* TAG = "System_task";
+                ESP_LOGI(TAG, "System_task started");
 
-        // Sends a request to the display queue, blocking until there's room for it.
-        void ui_send(const display_request_t& request) {
-            xQueueSend(g_display_queue, &request, portMAX_DELAY);
-        }
+                // Initialize the keypad
+                pad::keypad_t<false> keypad;
+                TRY_WITH_FUNC_VOID(keypad.init({.row_pins = config::KEYPAD_ROW_PINS, .col_pins = config::KEYPAD_COLUMN_PINS}), utils::fatal());
 
-        // Shows a transient feedback message (e.g. "Wrong password", "Number added") for
-        // config::UI_MESSAGE_DURATION_MS, after which the display reverts to whatever is
-        // sent next automatically re-renders it - this itself does not block the caller.
-        void ui_send_feedback(std::string_view line0, std::string_view line1 = "") {
-            ui_send(make_custom_request(line0, line1, true, config::UI_MESSAGE_DURATION_MS));
-        }
+                // get_event_queue() only fails if called when not initialized. Safe to extract the value directly
+                auto* keypad_event_queue = keypad.get_event_queue().value();
+                char  recv_key{};
 
-        // Renders the password entry screen, masking typed digits as asterisks.
-        void ui_render_password_prompt(std::string_view input) {
-            std::array<char, storage::PASSWORD_LEN> mask{};
-            mask.fill('*');
-            ui_send(make_custom_request("Enter password:", {mask.data(), input.size()}));
-        }
+                ui::state_t state = ui::state_t::AWAITING_PASSWORD;
 
-        void ui_render_menu(size_t menu_idx) {
-            ui_send(make_custom_request("-- Admin Menu --", ADMIN_MENU_ITEMS[menu_idx]));
-        }
+                // Digit entry buffer, sized for the largest thing ever typed into it (a chat ID).
+                std::array<char, telegram::CHAT_ID_LEN> input_buf{};
+                size_t                                  input_len = 0;
 
-        // Renders "<label> (i/n)" on line0 and the value itself on line1. Used by
-        // both the view and remove recipient flows.
-        void ui_render_number(std::string_view label, size_t idx, size_t count, std::string_view value) {
-            std::array<char, config::LCD_COLUMNS> header{};
+                // Holds the first entry of a new password while the user is asked to confirm it.
+                std::array<char, storage::PASSWORD_LEN> pw_pending{};
 
-            const int written =
-                snprintf(header.data(), header.size(), "%.*s (%zu/%zu)", static_cast<int>(label.size()), label.data(), idx + 1, count);
-            const size_t header_len = std::min(header.size(), static_cast<size_t>(std::max(written, 0)));
-            ui_send(make_custom_request({header.data(), header_len}, value));
-        }
+                size_t   menu_idx        = 0; // Selected item in the admin menu
+                size_t   list_idx        = 0; // Selected item while viewing/removing recipients
+                uint32_t failed_attempts = 0; // Consecutive failed password attempts (brute force protection)
 
-        // Renders "Network (i/n)" on line0 and the (possibly truncated) SSID on line1.
-        // Truncated SSIDs get a trailing '>' so it's obvious there's more to the name
-        // than what's shown on the 16-column display.
-        void ui_render_wifi_entry(size_t idx, size_t count, const wifi::ap_info_t& ap) {
-            std::array<char, config::LCD_COLUMNS> header{};
-            const int                             written    = snprintf(header.data(), header.size(), "Network (%zu/%zu)", idx + 1, count);
-            const size_t                          header_len = std::min(header.size(), static_cast<size_t>(std::max(written, 0)));
+                TickType_t lockout_until_tick = 0;
+                TickType_t last_activity_tick = xTaskGetTickCount();
 
-            std::string_view                      ssid_sv{ap.ssid.data()};
-            std::array<char, config::LCD_COLUMNS> ssid_line{};
-            ssid_line.fill(' ');
+                // WiFi setup state
+                std::array<wifi::ap_info_t, wifi::MAX_SCAN_RESULTS> wifi_scan_results{};
+                size_t                                              wifi_scan_count = 0;
+                size_t                                              wifi_list_idx   = 0;
 
-            const bool   truncated = ssid_sv.size() > config::LCD_COLUMNS;
-            const size_t copy_len  = std::min<size_t>(ssid_sv.size(), config::LCD_COLUMNS - (truncated ? 1 : 0));
-            std::copy_n(ssid_sv.begin(), copy_len, ssid_line.begin());
-            if (truncated) {
-                ssid_line[config::LCD_COLUMNS - 1] = '>';
-            }
+                std::array<char, wifi::SSID_LEN + 1>         wifi_selected_ssid{};
+                std::array<char, wifi::PASSWORD_MAX_LEN + 1> wifi_pw_buf{};
+                size_t                                       wifi_pw_len = 0;
 
-            ui_send(make_custom_request({header.data(), header_len}, {ssid_line.data(), ssid_line.size()}));
-        }
+                multitap::session_t mt_session{};
 
-        // Renders a single request to the LCD, whether it's a canned screen_type or free-form text.
-        void render_display_request(const display_request_t& request) {
-            if (request.use_custom_text) {
-                sys::println({request.line0.data(), request.line0.size()}, 0);
-                sys::println({request.line1.data(), request.line1.size()}, 1);
-            } else {
-                sys::println(SCREEN_MAP_LUT[std::to_underlying(request.screen_type)].first, 0);
-                sys::println(SCREEN_MAP_LUT[std::to_underlying(request.screen_type)].second, 1);
-            }
-        }
+                // Push the password request screen to the display queue
+                ui::send(password_req);
 
-        [[noreturn]] void system_task(void* arg) {
-            constexpr const char* TAG = "System_task";
-            ESP_LOGI(TAG, "System_task started");
+                while (true) {
+                    auto ret = xQueueReceive(keypad_event_queue, &recv_key, 0);
 
-            // Initialize the keypad
-            pad::keypad_t<false> keypad;
-            TRY_WITH_FUNC_VOID(keypad.init({.row_pins = config::KEYPAD_ROW_PINS, .col_pins = config::KEYPAD_COLUMN_PINS}), utils::fatal());
+                    // Handle lockout expiry / admin idle timeout / multi-tap timeout even when no key was pressed
+                    if (ret != pdPASS) {
+                        const auto now = xTaskGetTickCount();
 
-            // get_event_queue() only fails if called when not initialized. Safe to extract the value directly
-            auto* keypad_event_queue = keypad.get_event_queue().value();
-            char  recv_key{};
+                        if (state == ui::state_t::WIFI_PW_ENTRY) {
+                            mt_session.tick_timeout();
+                        }
 
-            ui_state_t state = ui_state_t::AWAITING_PASSWORD;
+                        if (state == ui::state_t::LOCKED_OUT && now >= lockout_until_tick) {
+                            ESP_LOGI(TAG, "Lockout period over. Accepting password attempts again");
+                            failed_attempts = 0;
+                            state           = ui::state_t::AWAITING_PASSWORD;
+                            input_len       = 0;
+                            ui::render_password_prompt({});
+                        } else if (state != ui::state_t::AWAITING_PASSWORD && state != ui::state_t::LOCKED_OUT &&
+                                   (now - last_activity_tick) >= pdMS_TO_TICKS(config::ADMIN_IDLE_TIMEOUT_MS)) {
+                            ESP_LOGI(TAG, "Admin session idle for too long. Logging out");
+                            g_admin_mode = false;
+                            state        = ui::state_t::AWAITING_PASSWORD;
+                            input_len    = 0;
+                            ui::send(password_req);
+                        }
 
-            // Digit entry buffer, sized for the largest thing ever typed into it (a chat ID).
-            std::array<char, telegram::CHAT_ID_LEN> input_buf{};
-            size_t                                  input_len = 0;
-
-            // Holds the first entry of a new password while the user is asked to confirm it.
-            std::array<char, storage::PASSWORD_LEN> pw_pending{};
-
-            size_t   menu_idx        = 0; // Selected item in the admin menu
-            size_t   list_idx        = 0; // Selected item while viewing/removing recipients
-            uint32_t failed_attempts = 0; // Consecutive failed password attempts (brute force protection)
-
-            TickType_t lockout_until_tick = 0;
-            TickType_t last_activity_tick = xTaskGetTickCount();
-
-            // WiFi setup state
-            std::array<wifi::ap_info_t, wifi::MAX_SCAN_RESULTS> wifi_scan_results{};
-            size_t                                              wifi_scan_count = 0;
-            size_t                                              wifi_list_idx   = 0;
-
-            std::array<char, wifi::SSID_LEN + 1>         wifi_selected_ssid{};
-            std::array<char, wifi::PASSWORD_MAX_LEN + 1> wifi_pw_buf{};
-            size_t                                       wifi_pw_len = 0;
-
-            multitap::session_t mt_session{};
-
-            // Push the password request screen to the display queue
-            ui_send(password_req);
-
-            while (true) {
-                auto ret = xQueueReceive(keypad_event_queue, &recv_key, 0);
-
-                // Handle lockout expiry / admin idle timeout / multi-tap timeout even when no key was pressed
-                if (ret != pdPASS) {
-                    const auto now = xTaskGetTickCount();
-
-                    if (state == ui_state_t::WIFI_PW_ENTRY) {
-                        mt_session.tick_timeout();
+                        vTaskDelay(pdMS_TO_TICKS(config::KEYPAD_POLL_PERIOD_MS));
+                        continue;
                     }
 
-                    if (state == ui_state_t::LOCKED_OUT && now >= lockout_until_tick) {
-                        ESP_LOGI(TAG, "Lockout period over. Accepting password attempts again");
-                        failed_attempts = 0;
-                        state           = ui_state_t::AWAITING_PASSWORD;
-                        input_len       = 0;
-                        ui_render_password_prompt({});
-                    } else if (state != ui_state_t::AWAITING_PASSWORD && state != ui_state_t::LOCKED_OUT &&
-                               (now - last_activity_tick) >= pdMS_TO_TICKS(config::ADMIN_IDLE_TIMEOUT_MS)) {
-                        ESP_LOGI(TAG, "Admin session idle for too long. Logging out");
-                        g_admin_mode = false;
-                        state        = ui_state_t::AWAITING_PASSWORD;
-                        input_len    = 0;
-                        ui_send(password_req);
-                    }
+                    ESP_LOGI(TAG, "Key pressed: %c", recv_key);
+                    last_activity_tick = xTaskGetTickCount();
 
-                    vTaskDelay(pdMS_TO_TICKS(config::KEYPAD_POLL_PERIOD_MS));
-                    continue;
-                }
+                    switch (state) {
+                        case ui::state_t::AWAITING_PASSWORD: {
+                            if (recv_key >= '0' && recv_key <= '9') {
+                                if (input_len < storage::PASSWORD_LEN) {
+                                    input_buf[input_len++] = recv_key;
+                                }
+                            } else if (recv_key == 'B') {
+                                if (input_len > 0) {
+                                    input_buf[--input_len] = '\0';
+                                }
+                            } else if (recv_key == '*') {
+                                input_len = 0;
+                            } else if (recv_key == 'A') {
+                                if (input_len != storage::PASSWORD_LEN) {
+                                    break; // Not enough digits typed yet. Ignore.
+                                }
 
-                ESP_LOGI(TAG, "Key pressed: %c", recv_key);
-                last_activity_tick = xTaskGetTickCount();
+                                if (storage::check_pswd({input_buf.data(), input_len})) {
+                                    ESP_LOGI(TAG, "Correct password entered. Entering admin mode");
+                                    failed_attempts = 0;
+                                    input_len       = 0;
+                                    g_admin_mode    = true;
+                                    state           = ui::state_t::ADMIN_MENU;
+                                    menu_idx        = 0;
+                                    ui::render_menu(menu_idx);
+                                    break;
+                                }
 
-                switch (state) {
-                    case ui_state_t::AWAITING_PASSWORD: {
-                        if (recv_key >= '0' && recv_key <= '9') {
-                            if (input_len < storage::PASSWORD_LEN) {
-                                input_buf[input_len++] = recv_key;
-                            }
-                        } else if (recv_key == 'B') {
-                            if (input_len > 0) {
-                                input_buf[--input_len] = '\0';
-                            }
-                        } else if (recv_key == '*') {
-                            input_len = 0;
-                        } else if (recv_key == 'A') {
-                            if (input_len != storage::PASSWORD_LEN) {
-                                break; // Not enough digits typed yet. Ignore.
-                            }
+                                input_len = 0;
+                                failed_attempts++;
+                                ESP_LOGW(TAG, "Incorrect password entered (%u/%u attempts)", failed_attempts, config::MAX_PASSWORD_ATTEMPTS);
 
-                            if (storage::check_pswd({input_buf.data(), input_len})) {
-                                ESP_LOGI(TAG, "Correct password entered. Entering admin mode");
-                                failed_attempts = 0;
-                                input_len       = 0;
-                                g_admin_mode    = true;
-                                state           = ui_state_t::ADMIN_MENU;
-                                menu_idx        = 0;
-                                ui_render_menu(menu_idx);
+                                if (failed_attempts >= config::MAX_PASSWORD_ATTEMPTS) {
+                                    state              = ui::state_t::LOCKED_OUT;
+                                    lockout_until_tick = xTaskGetTickCount() + pdMS_TO_TICKS(config::LOCKOUT_DURATION_MS);
+                                    ESP_LOGW(TAG, "Too many failed attempts. Locking keypad for %lu ms", config::LOCKOUT_DURATION_MS);
+                                    ui::send(make_custom_request("Too many tries", "Keypad locked"));
+                                } else {
+                                    ui::send_feedback("Wrong password");
+                                }
                                 break;
                             }
 
-                            input_len = 0;
-                            failed_attempts++;
-                            ESP_LOGW(TAG, "Incorrect password entered (%u/%u attempts)", failed_attempts, config::MAX_PASSWORD_ATTEMPTS);
-
-                            if (failed_attempts >= config::MAX_PASSWORD_ATTEMPTS) {
-                                state              = ui_state_t::LOCKED_OUT;
-                                lockout_until_tick = xTaskGetTickCount() + pdMS_TO_TICKS(config::LOCKOUT_DURATION_MS);
-                                ESP_LOGW(TAG, "Too many failed attempts. Locking keypad for %lu ms", config::LOCKOUT_DURATION_MS);
-                                ui_send(make_custom_request("Too many tries", "Keypad locked"));
-                            } else {
-                                ui_send_feedback("Wrong password");
+                            if (state == ui::state_t::AWAITING_PASSWORD) {
+                                ui::render_password_prompt({input_buf.data(), input_len});
                             }
                             break;
                         }
 
-                        if (state == ui_state_t::AWAITING_PASSWORD) {
-                            ui_render_password_prompt({input_buf.data(), input_len});
+                        case ui::state_t::LOCKED_OUT: {
+                            // Ignore all input till the lockout period is over (handled above).
+                            break;
                         }
-                        break;
-                    }
 
-                    case ui_state_t::LOCKED_OUT: {
-                        // Ignore all input till the lockout period is over (handled above).
-                        break;
-                    }
-
-                    case ui_state_t::ADMIN_MENU: {
-                        if (recv_key == 'C') {
-                            menu_idx = (menu_idx == 0) ? (ADMIN_MENU_ITEMS.size() - 1) : (menu_idx - 1);
-                            ui_render_menu(menu_idx);
-                        } else if (recv_key == 'D') {
-                            menu_idx = (menu_idx + 1) % ADMIN_MENU_ITEMS.size();
-                            ui_render_menu(menu_idx);
-                        } else if (recv_key == '#') {
-                            g_admin_mode = false;
-                            state        = ui_state_t::AWAITING_PASSWORD;
-                            input_len    = 0;
-                            ui_send(password_req);
-                        } else if (recv_key == 'A') {
-                            switch (menu_idx) {
-                                case 0: // View numbers
-                                {
-                                    auto recipients = storage::get_recipients();
-                                    if (!recipients || recipients->empty()) {
-                                        ui_send_feedback("No numbers", "registered yet");
-                                        ui_render_menu(menu_idx);
-                                    } else {
-                                        list_idx = 0;
-                                        state    = ui_state_t::VIEW_NUMBERS;
-                                        ui_render_number(
-                                            "Number", list_idx, recipients->size(), {(*recipients)[list_idx].data(), (*recipients)[list_idx].size()});
-                                    }
-                                    break;
-                                }
-                                case 1: // Add number
-                                    input_len = 0;
-                                    state     = ui_state_t::ADD_NUMBER;
-                                    ui_send(make_custom_request("New chat ID:", ""));
-                                    break;
-                                case 2: // Remove number
-                                {
-                                    auto recipients = storage::get_recipients();
-                                    if (!recipients || recipients->empty()) {
-                                        ui_send_feedback("No numbers", "registered yet");
-                                        ui_render_menu(menu_idx);
-                                    } else {
-                                        list_idx = 0;
-                                        state    = ui_state_t::RM_NUMBER;
-                                        ui_render_number("Delete?",
-                                                         list_idx,
-                                                         recipients->size(),
-                                                         {(*recipients)[list_idx].data(), (*recipients)[list_idx].size()});
-                                    }
-                                    break;
-                                }
-                                case 3: // Change password
-                                    input_len = 0;
-                                    state     = ui_state_t::CHANGE_PW_NEW;
-                                    ui_send(make_custom_request("New password:", ""));
-                                    break;
-                                case 4: // WiFi setup
-                                {
-                                    state = ui_state_t::WIFI_SCANNING;
-                                    ui_send(make_custom_request("Scanning for", "networks..."));
-
-                                    esp_err_t scan_ret = wifi::scan(wifi_scan_results, wifi_scan_count);
-                                    if (scan_ret != ESP_OK || wifi_scan_count == 0) {
-                                        ESP_LOGW(TAG, "WiFi scan found nothing or failed: %s", esp_err_to_name(scan_ret));
-                                        ui_send_feedback("No networks", "found");
-                                        state = ui_state_t::ADMIN_MENU;
-                                        ui_render_menu(menu_idx);
+                        case ui::state_t::ADMIN_MENU: {
+                            if (recv_key == 'C') {
+                                menu_idx = (menu_idx == 0) ? (ui::ADMIN_MENU_ITEMS.size() - 1) : (menu_idx - 1);
+                                ui::render_menu(menu_idx);
+                            } else if (recv_key == 'D') {
+                                menu_idx = (menu_idx + 1) % ui::ADMIN_MENU_ITEMS.size();
+                                ui::render_menu(menu_idx);
+                            } else if (recv_key == '#') {
+                                g_admin_mode = false;
+                                state        = ui::state_t::AWAITING_PASSWORD;
+                                input_len    = 0;
+                                ui::send(password_req);
+                            } else if (recv_key == 'A') {
+                                switch (menu_idx) {
+                                    case 0: // View numbers
+                                    {
+                                        auto recipients = storage::get_recipients();
+                                        if (!recipients || recipients->empty()) {
+                                            ui::send_feedback("No numbers", "registered yet");
+                                            ui::render_menu(menu_idx);
+                                        } else {
+                                            list_idx = 0;
+                                            state    = ui::state_t::VIEW_NUMBERS;
+                                            ui::render_number("Number",
+                                                              list_idx,
+                                                              recipients->size(),
+                                                              {(*recipients)[list_idx].data(), (*recipients)[list_idx].size()});
+                                        }
                                         break;
                                     }
+                                    case 1: // Add number
+                                        input_len = 0;
+                                        state     = ui::state_t::ADD_NUMBER;
+                                        ui::send(make_custom_request("New chat ID:", ""));
+                                        break;
+                                    case 2: // Remove number
+                                    {
+                                        auto recipients = storage::get_recipients();
+                                        if (!recipients || recipients->empty()) {
+                                            ui::send_feedback("No numbers", "registered yet");
+                                            ui::render_menu(menu_idx);
+                                        } else {
+                                            list_idx = 0;
+                                            state    = ui::state_t::RM_NUMBER;
+                                            ui::render_number("Delete?",
+                                                              list_idx,
+                                                              recipients->size(),
+                                                              {(*recipients)[list_idx].data(), (*recipients)[list_idx].size()});
+                                        }
+                                        break;
+                                    }
+                                    case 3: // Change password
+                                        input_len = 0;
+                                        state     = ui::state_t::CHANGE_PW_NEW;
+                                        ui::send(make_custom_request("New password:", ""));
+                                        break;
+                                    case 4: // WiFi setup
+                                    {
+                                        state = ui::state_t::WIFI_SCANNING;
+                                        ui::send(make_custom_request("Scanning for", "networks..."));
 
-                                    wifi_list_idx = 0;
-                                    state         = ui_state_t::WIFI_LIST;
-                                    ui_render_wifi_entry(wifi_list_idx, wifi_scan_count, wifi_scan_results[wifi_list_idx]);
-                                    break;
+                                        esp_err_t scan_ret = wifi::scan(wifi_scan_results, wifi_scan_count);
+                                        if (scan_ret != ESP_OK || wifi_scan_count == 0) {
+                                            ESP_LOGW(TAG, "WiFi scan found nothing or failed: %s", esp_err_to_name(scan_ret));
+                                            ui::send_feedback("No networks", "found");
+                                            state = ui::state_t::ADMIN_MENU;
+                                            ui::render_menu(menu_idx);
+                                            break;
+                                        }
+
+                                        wifi_list_idx = 0;
+                                        state         = ui::state_t::WIFI_LIST;
+                                        ui::render_wifi_entry(wifi_list_idx, wifi_scan_count, wifi_scan_results[wifi_list_idx]);
+                                        break;
+                                    }
+                                    default:
+                                        break;
                                 }
-                                default:
-                                    break;
                             }
-                        }
-                        break;
-                    }
-
-                    case ui_state_t::VIEW_NUMBERS: {
-                        auto recipients = storage::get_recipients();
-                        if (!recipients || recipients->empty()) {
-                            state = ui_state_t::ADMIN_MENU;
-                            ui_render_menu(menu_idx);
                             break;
                         }
 
-                        if (recv_key == 'C') {
-                            list_idx = (list_idx == 0) ? (recipients->size() - 1) : (list_idx - 1);
-                        } else if (recv_key == 'D') {
-                            list_idx = (list_idx + 1) % recipients->size();
-                        } else if (recv_key == '*' || recv_key == 'B' || recv_key == 'A') {
-                            state = ui_state_t::ADMIN_MENU;
-                            ui_render_menu(menu_idx);
-                            break;
-                        } else if (recv_key == '#') {
-                            g_admin_mode = false;
-                            state        = ui_state_t::AWAITING_PASSWORD;
-                            ui_send(password_req);
-                            break;
-                        }
-
-                        ui_render_number("Number", list_idx, recipients->size(), {(*recipients)[list_idx].data(), (*recipients)[list_idx].size()});
-                        break;
-                    }
-
-                    case ui_state_t::ADD_NUMBER: {
-                        if (recv_key >= '0' && recv_key <= '9') {
-                            if (input_len < telegram::CHAT_ID_LEN) {
-                                input_buf[input_len++] = recv_key;
-                            }
-                        } else if (recv_key == 'B') {
-                            if (input_len > 0) {
-                                input_buf[--input_len] = '\0';
-                            }
-                        } else if (recv_key == '*') {
-                            state = ui_state_t::ADMIN_MENU;
-                            ui_render_menu(menu_idx);
-                            break;
-                        } else if (recv_key == '#') {
-                            g_admin_mode = false;
-                            state        = ui_state_t::AWAITING_PASSWORD;
-                            ui_send(password_req);
-                            break;
-                        } else if (recv_key == 'A') {
-                            if (input_len != telegram::CHAT_ID_LEN) {
-                                break; // Not enough digits yet. Ignore.
-                            }
-
-                            if (auto err = storage::add_recipient({input_buf.data(), input_len}); err == ESP_OK) {
-                                ESP_LOGI(TAG, "Recipient added");
-                                ui_send_feedback("Number added");
-                            } else {
-                                ESP_LOGW(TAG, "Failed to add recipient: %s", esp_err_to_name(err));
-                                ui_send_feedback("Add failed", (err == ESP_ERR_INVALID_STATE) ? "Already exists" : "Storage full?");
-                            }
-
-                            input_len = 0;
-                            state     = ui_state_t::ADMIN_MENU;
-                            ui_render_menu(menu_idx);
-                            break;
-                        }
-
-                        if (state == ui_state_t::ADD_NUMBER) {
-                            ui_send(make_custom_request("New chat ID:", {input_buf.data(), input_len}));
-                        }
-                        break;
-                    }
-
-                    case ui_state_t::RM_NUMBER: {
-                        auto recipients = storage::get_recipients();
-                        if (!recipients || recipients->empty()) {
-                            state = ui_state_t::ADMIN_MENU;
-                            ui_render_menu(menu_idx);
-                            break;
-                        }
-
-                        if (recv_key == 'C') {
-                            list_idx = (list_idx == 0) ? (recipients->size() - 1) : (list_idx - 1);
-                        } else if (recv_key == 'D') {
-                            list_idx = (list_idx + 1) % recipients->size();
-                        } else if (recv_key == '*' || recv_key == 'B') {
-                            state = ui_state_t::ADMIN_MENU;
-                            ui_render_menu(menu_idx);
-                            break;
-                        } else if (recv_key == '#') {
-                            g_admin_mode = false;
-                            state        = ui_state_t::AWAITING_PASSWORD;
-                            ui_send(password_req);
-                            break;
-                        } else if (recv_key == 'A') {
-                            const auto& target = (*recipients)[list_idx];
-                            if (auto err = storage::rm_recipient({target.data(), target.size()}); err == ESP_OK) {
-                                ESP_LOGI(TAG, "Recipient removed");
-                                ui_send_feedback("Number removed");
-                            } else {
-                                ESP_LOGW(TAG, "Failed to remove recipient: %s", esp_err_to_name(err));
-                                ui_send_feedback("Removal failed");
-                            }
-                            state = ui_state_t::ADMIN_MENU;
-                            ui_render_menu(menu_idx);
-                            break;
-                        }
-
-                        if (state == ui_state_t::RM_NUMBER) {
-                            ui_render_number(
-                                "Delete?", list_idx, recipients->size(), {(*recipients)[list_idx].data(), (*recipients)[list_idx].size()});
-                        }
-                        break;
-                    }
-
-                    case ui_state_t::CHANGE_PW_NEW: {
-                        if (recv_key >= '0' && recv_key <= '9') {
-                            if (input_len < storage::PASSWORD_LEN) {
-                                input_buf[input_len++] = recv_key;
-                            }
-                        } else if (recv_key == 'B') {
-                            if (input_len > 0) {
-                                input_buf[--input_len] = '\0';
-                            }
-                        } else if (recv_key == '*') {
-                            input_len = 0;
-                            state     = ui_state_t::ADMIN_MENU;
-                            ui_render_menu(menu_idx);
-                            break;
-                        } else if (recv_key == '#') {
-                            g_admin_mode = false;
-                            state        = ui_state_t::AWAITING_PASSWORD;
-                            ui_send(password_req);
-                            break;
-                        } else if (recv_key == 'A') {
-                            if (input_len != storage::PASSWORD_LEN) {
-                                break; // Not enough digits yet. Ignore.
-                            }
-                            std::copy_n(input_buf.begin(), storage::PASSWORD_LEN, pw_pending.begin());
-                            input_len = 0;
-                            state     = ui_state_t::CHANGE_PW_CONFIRM;
-                            ui_send(make_custom_request("Confirm pswd:", ""));
-                            break;
-                        }
-
-                        if (state == ui_state_t::CHANGE_PW_NEW) {
-                            std::array<char, storage::PASSWORD_LEN> mask{};
-                            mask.fill('*');
-                            ui_send(make_custom_request("New password:", {mask.data(), input_len}));
-                        }
-                        break;
-                    }
-
-                    case ui_state_t::CHANGE_PW_CONFIRM: {
-                        if (recv_key >= '0' && recv_key <= '9') {
-                            if (input_len < storage::PASSWORD_LEN) {
-                                input_buf[input_len++] = recv_key;
-                            }
-                        } else if (recv_key == 'B') {
-                            if (input_len > 0) {
-                                input_buf[--input_len] = '\0';
-                            }
-                        } else if (recv_key == '*') {
-                            input_len = 0;
-                            state     = ui_state_t::ADMIN_MENU;
-                            ui_render_menu(menu_idx);
-                            break;
-                        } else if (recv_key == '#') {
-                            g_admin_mode = false;
-                            state        = ui_state_t::AWAITING_PASSWORD;
-                            ui_send(password_req);
-                            break;
-                        } else if (recv_key == 'A') {
-                            if (input_len != storage::PASSWORD_LEN) {
-                                break; // Not enough digits yet. Ignore.
-                            }
-
-                            const bool matches = std::equal(pw_pending.begin(), pw_pending.end(), input_buf.begin());
-                            input_len          = 0;
-
-                            if (!matches) {
-                                ESP_LOGW(TAG, "Password confirmation mismatch");
-                                ui_send_feedback("Mismatch", "Try again");
-                                state = ui_state_t::CHANGE_PW_NEW;
-                                ui_send(make_custom_request("New password:", ""));
+                        case ui::state_t::VIEW_NUMBERS: {
+                            auto recipients = storage::get_recipients();
+                            if (!recipients || recipients->empty()) {
+                                state = ui::state_t::ADMIN_MENU;
+                                ui::render_menu(menu_idx);
                                 break;
                             }
 
-                            if (auto err = storage::change_pswd({pw_pending.data(), pw_pending.size()}); err == ESP_OK) {
-                                ESP_LOGI(TAG, "Password changed");
-                                ui_send_feedback("Password", "changed");
-                            } else {
-                                ESP_LOGW(TAG, "Failed to change password: %s", esp_err_to_name(err));
-                                ui_send_feedback("Change failed");
+                            if (recv_key == 'C') {
+                                list_idx = (list_idx == 0) ? (recipients->size() - 1) : (list_idx - 1);
+                            } else if (recv_key == 'D') {
+                                list_idx = (list_idx + 1) % recipients->size();
+                            } else if (recv_key == '*' || recv_key == 'B' || recv_key == 'A') {
+                                state = ui::state_t::ADMIN_MENU;
+                                ui::render_menu(menu_idx);
+                                break;
+                            } else if (recv_key == '#') {
+                                g_admin_mode = false;
+                                state        = ui::state_t::AWAITING_PASSWORD;
+                                ui::send(password_req);
+                                break;
                             }
 
-                            pw_pending.fill('\0');
-                            state = ui_state_t::ADMIN_MENU;
-                            ui_render_menu(menu_idx);
+                            ui::render_number(
+                                "Number", list_idx, recipients->size(), {(*recipients)[list_idx].data(), (*recipients)[list_idx].size()});
                             break;
                         }
 
-                        if (state == ui_state_t::CHANGE_PW_CONFIRM) {
-                            std::array<char, storage::PASSWORD_LEN> mask{};
-                            mask.fill('*');
-                            ui_send(make_custom_request("Confirm pswd:", {mask.data(), input_len}));
-                        }
-                        break;
-                    }
+                        case ui::state_t::ADD_NUMBER: {
+                            if (recv_key >= '0' && recv_key <= '9') {
+                                if (input_len < telegram::CHAT_ID_LEN) {
+                                    input_buf[input_len++] = recv_key;
+                                }
+                            } else if (recv_key == 'B') {
+                                if (input_len > 0) {
+                                    input_buf[--input_len] = '\0';
+                                }
+                            } else if (recv_key == '*') {
+                                state = ui::state_t::ADMIN_MENU;
+                                ui::render_menu(menu_idx);
+                                break;
+                            } else if (recv_key == '#') {
+                                g_admin_mode = false;
+                                state        = ui::state_t::AWAITING_PASSWORD;
+                                ui::send(password_req);
+                                break;
+                            } else if (recv_key == 'A') {
+                                if (input_len != telegram::CHAT_ID_LEN) {
+                                    break; // Not enough digits yet. Ignore.
+                                }
 
-                    case ui_state_t::WIFI_SCANNING: {
-                        // Transient - scan() is synchronous and already moved state on
-                        // by the time control would reach here.
-                        break;
-                    }
-
-                    case ui_state_t::WIFI_LIST: {
-                        if (recv_key == 'C') {
-                            wifi_list_idx = (wifi_list_idx == 0) ? (wifi_scan_count - 1) : (wifi_list_idx - 1);
-                        } else if (recv_key == 'D') {
-                            wifi_list_idx = (wifi_list_idx + 1) % wifi_scan_count;
-                        } else if (recv_key == '*') {
-                            state = ui_state_t::ADMIN_MENU;
-                            ui_render_menu(menu_idx);
-                            break;
-                        } else if (recv_key == '#') {
-                            g_admin_mode = false;
-                            state        = ui_state_t::AWAITING_PASSWORD;
-                            ui_send(password_req);
-                            break;
-                        } else if (recv_key == 'A') {
-                            const auto& chosen = wifi_scan_results[wifi_list_idx];
-                            wifi_selected_ssid.fill('\0');
-                            std::strncpy(wifi_selected_ssid.data(), chosen.ssid.data(), wifi_selected_ssid.size() - 1);
-                            const size_t ssid_len = std::strlen(wifi_selected_ssid.data());
-
-                            if (chosen.authmode == WIFI_AUTH_OPEN) {
-                                // No password needed - connect straight away.
-                                state = ui_state_t::WIFI_CONNECTING;
-                                ui_send(make_custom_request("Connecting to", {wifi_selected_ssid.data(), ssid_len}));
-
-                                esp_err_t conn_ret = wifi::connect({wifi_selected_ssid.data(), ssid_len}, "");
-                                if (conn_ret == ESP_OK) {
-                                    [[maybe_unused]] auto _ = storage::set_wifi_creds({wifi_selected_ssid.data(), ssid_len}, "");
-                                    ui_send_feedback("Connected!");
+                                if (auto err = storage::add_recipient({input_buf.data(), input_len}); err == ESP_OK) {
+                                    ESP_LOGI(TAG, "Recipient added");
+                                    ui::send_feedback("Number added");
                                 } else {
-                                    ui_send_feedback("Connect failed", "Check network");
+                                    ESP_LOGW(TAG, "Failed to add recipient: %s", esp_err_to_name(err));
+                                    ui::send_feedback("Add failed", (err == ESP_ERR_INVALID_STATE) ? "Already exists" : "Storage full?");
                                 }
-                                state = ui_state_t::ADMIN_MENU;
-                                ui_render_menu(menu_idx);
-                            } else {
-                                wifi_pw_len = 0;
-                                wifi_pw_buf.fill('\0');
-                                mt_session.reset();
-                                state = ui_state_t::WIFI_PW_ENTRY;
-                                ui_send(make_custom_request("Password:", ""));
-                            }
-                            break;
-                        }
 
-                        ui_render_wifi_entry(wifi_list_idx, wifi_scan_count, wifi_scan_results[wifi_list_idx]);
-                        break;
-                    }
-
-                    case ui_state_t::WIFI_PW_ENTRY: {
-                        if (recv_key >= '0' && recv_key <= '9') {
-                            if (!mt_session.on_digit(recv_key, wifi_pw_buf, wifi_pw_len)) {
-                                break; // Buffer full, press dropped
-                            }
-                        } else if (recv_key == 'B') {
-                            if (wifi_pw_len > 0) {
-                                wifi_pw_buf[--wifi_pw_len] = '\0';
-                            }
-                            mt_session.on_backspace();
-                        } else if (recv_key == 'C') {
-                            mt_session.toggle_caps(wifi_pw_buf, wifi_pw_len);
-                        } else if (recv_key == '*') {
-                            state = ui_state_t::WIFI_LIST;
-                            ui_render_wifi_entry(wifi_list_idx, wifi_scan_count, wifi_scan_results[wifi_list_idx]);
-                            break;
-                        } else if (recv_key == '#') {
-                            g_admin_mode = false;
-                            state        = ui_state_t::AWAITING_PASSWORD;
-                            ui_send(password_req);
-                            break;
-                        } else if (recv_key == 'A') {
-                            if (wifi_pw_len < 8) { // WPA2 minimum
-                                ui_send_feedback("Too short", "Min 8 chars");
+                                input_len = 0;
+                                state     = ui::state_t::ADMIN_MENU;
+                                ui::render_menu(menu_idx);
                                 break;
                             }
 
-                            const size_t ssid_len = std::strlen(wifi_selected_ssid.data());
-                            state                 = ui_state_t::WIFI_CONNECTING;
-                            ui_send(make_custom_request("Connecting to", {wifi_selected_ssid.data(), ssid_len}));
-
-                            esp_err_t conn_ret = wifi::connect({wifi_selected_ssid.data(), ssid_len}, {wifi_pw_buf.data(), wifi_pw_len});
-                            if (conn_ret == ESP_OK) {
-                                [[maybe_unused]] auto _ =
-                                    storage::set_wifi_creds({wifi_selected_ssid.data(), ssid_len}, {wifi_pw_buf.data(), wifi_pw_len});
-                                ui_send_feedback("Connected!");
-                            } else {
-                                ui_send_feedback("Connect failed", "Wrong password?");
+                            if (state == ui::state_t::ADD_NUMBER) {
+                                ui::send(make_custom_request("New chat ID:", {input_buf.data(), input_len}));
                             }
-
-                            wifi_pw_buf.fill('\0');
-                            wifi_pw_len = 0;
-                            state       = ui_state_t::ADMIN_MENU;
-                            ui_render_menu(menu_idx);
                             break;
                         }
 
-                        if (state == ui_state_t::WIFI_PW_ENTRY) {
-                            // Mask everything except the char currently being cycled (if
-                            // any), so the user can see what they're about to lock in -
-                            // same trick old T9 phones used for password fields.
-                            std::array<char, wifi::PASSWORD_MAX_LEN> display_buf{};
-                            for (size_t i = 0; i < wifi_pw_len; i++) {
-                                const bool is_live_char = mt_session.is_pending() && (i == wifi_pw_len - 1);
-                                display_buf[i]          = is_live_char ? wifi_pw_buf[i] : '*';
+                        case ui::state_t::RM_NUMBER: {
+                            auto recipients = storage::get_recipients();
+                            if (!recipients || recipients->empty()) {
+                                state = ui::state_t::ADMIN_MENU;
+                                ui::render_menu(menu_idx);
+                                break;
                             }
-                            // Show only the trailing LCD_COLUMNS characters so typing past 16 chars scrolls.
-                            const size_t start = wifi_pw_len > config::LCD_COLUMNS ? (wifi_pw_len - config::LCD_COLUMNS) : 0;
-                            ui_send(make_custom_request("Password:", {display_buf.data() + start, wifi_pw_len - start}));
+
+                            if (recv_key == 'C') {
+                                list_idx = (list_idx == 0) ? (recipients->size() - 1) : (list_idx - 1);
+                            } else if (recv_key == 'D') {
+                                list_idx = (list_idx + 1) % recipients->size();
+                            } else if (recv_key == '*' || recv_key == 'B') {
+                                state = ui::state_t::ADMIN_MENU;
+                                ui::render_menu(menu_idx);
+                                break;
+                            } else if (recv_key == '#') {
+                                g_admin_mode = false;
+                                state        = ui::state_t::AWAITING_PASSWORD;
+                                ui::send(password_req);
+                                break;
+                            } else if (recv_key == 'A') {
+                                const auto& target = (*recipients)[list_idx];
+                                if (auto err = storage::rm_recipient({target.data(), target.size()}); err == ESP_OK) {
+                                    ESP_LOGI(TAG, "Recipient removed");
+                                    ui::send_feedback("Number removed");
+                                } else {
+                                    ESP_LOGW(TAG, "Failed to remove recipient: %s", esp_err_to_name(err));
+                                    ui::send_feedback("Removal failed");
+                                }
+                                state = ui::state_t::ADMIN_MENU;
+                                ui::render_menu(menu_idx);
+                                break;
+                            }
+
+                            if (state == ui::state_t::RM_NUMBER) {
+                                ui::render_number(
+                                    "Delete?", list_idx, recipients->size(), {(*recipients)[list_idx].data(), (*recipients)[list_idx].size()});
+                            }
+                            break;
                         }
-                        break;
-                    }
 
-                    case ui_state_t::WIFI_CONNECTING: {
-                        // Transient - connect() is synchronous, state has already moved
-                        // on by the time control would reach here.
-                        break;
+                        case ui::state_t::CHANGE_PW_NEW: {
+                            if (recv_key >= '0' && recv_key <= '9') {
+                                if (input_len < storage::PASSWORD_LEN) {
+                                    input_buf[input_len++] = recv_key;
+                                }
+                            } else if (recv_key == 'B') {
+                                if (input_len > 0) {
+                                    input_buf[--input_len] = '\0';
+                                }
+                            } else if (recv_key == '*') {
+                                input_len = 0;
+                                state     = ui::state_t::ADMIN_MENU;
+                                ui::render_menu(menu_idx);
+                                break;
+                            } else if (recv_key == '#') {
+                                g_admin_mode = false;
+                                state        = ui::state_t::AWAITING_PASSWORD;
+                                ui::send(password_req);
+                                break;
+                            } else if (recv_key == 'A') {
+                                if (input_len != storage::PASSWORD_LEN) {
+                                    break; // Not enough digits yet. Ignore.
+                                }
+                                std::copy_n(input_buf.begin(), storage::PASSWORD_LEN, pw_pending.begin());
+                                input_len = 0;
+                                state     = ui::state_t::CHANGE_PW_CONFIRM;
+                                ui::send(make_custom_request("Confirm pswd:", ""));
+                                break;
+                            }
+
+                            if (state == ui::state_t::CHANGE_PW_NEW) {
+                                std::array<char, storage::PASSWORD_LEN> mask{};
+                                mask.fill('*');
+                                ui::send(make_custom_request("New password:", {mask.data(), input_len}));
+                            }
+                            break;
+                        }
+
+                        case ui::state_t::CHANGE_PW_CONFIRM: {
+                            if (recv_key >= '0' && recv_key <= '9') {
+                                if (input_len < storage::PASSWORD_LEN) {
+                                    input_buf[input_len++] = recv_key;
+                                }
+                            } else if (recv_key == 'B') {
+                                if (input_len > 0) {
+                                    input_buf[--input_len] = '\0';
+                                }
+                            } else if (recv_key == '*') {
+                                input_len = 0;
+                                state     = ui::state_t::ADMIN_MENU;
+                                ui::render_menu(menu_idx);
+                                break;
+                            } else if (recv_key == '#') {
+                                g_admin_mode = false;
+                                state        = ui::state_t::AWAITING_PASSWORD;
+                                ui::send(password_req);
+                                break;
+                            } else if (recv_key == 'A') {
+                                if (input_len != storage::PASSWORD_LEN) {
+                                    break; // Not enough digits yet. Ignore.
+                                }
+
+                                const bool matches = std::equal(pw_pending.begin(), pw_pending.end(), input_buf.begin());
+                                input_len          = 0;
+
+                                if (!matches) {
+                                    ESP_LOGW(TAG, "Password confirmation mismatch");
+                                    ui::send_feedback("Mismatch", "Try again");
+                                    state = ui::state_t::CHANGE_PW_NEW;
+                                    ui::send(make_custom_request("New password:", ""));
+                                    break;
+                                }
+
+                                if (auto err = storage::change_pswd({pw_pending.data(), pw_pending.size()}); err == ESP_OK) {
+                                    ESP_LOGI(TAG, "Password changed");
+                                    ui::send_feedback("Password", "changed");
+                                } else {
+                                    ESP_LOGW(TAG, "Failed to change password: %s", esp_err_to_name(err));
+                                    ui::send_feedback("Change failed");
+                                }
+
+                                pw_pending.fill('\0');
+                                state = ui::state_t::ADMIN_MENU;
+                                ui::render_menu(menu_idx);
+                                break;
+                            }
+
+                            if (state == ui::state_t::CHANGE_PW_CONFIRM) {
+                                std::array<char, storage::PASSWORD_LEN> mask{};
+                                mask.fill('*');
+                                ui::send(make_custom_request("Confirm pswd:", {mask.data(), input_len}));
+                            }
+                            break;
+                        }
+
+                        case ui::state_t::WIFI_SCANNING: {
+                            // Transient - scan() is synchronous and already moved state on
+                            // by the time control would reach here.
+                            break;
+                        }
+
+                        case ui::state_t::WIFI_LIST: {
+                            if (recv_key == 'C') {
+                                wifi_list_idx = (wifi_list_idx == 0) ? (wifi_scan_count - 1) : (wifi_list_idx - 1);
+                            } else if (recv_key == 'D') {
+                                wifi_list_idx = (wifi_list_idx + 1) % wifi_scan_count;
+                            } else if (recv_key == '*') {
+                                state = ui::state_t::ADMIN_MENU;
+                                ui::render_menu(menu_idx);
+                                break;
+                            } else if (recv_key == '#') {
+                                g_admin_mode = false;
+                                state        = ui::state_t::AWAITING_PASSWORD;
+                                ui::send(password_req);
+                                break;
+                            } else if (recv_key == 'A') {
+                                const auto& chosen = wifi_scan_results[wifi_list_idx];
+                                wifi_selected_ssid.fill('\0');
+                                std::strncpy(wifi_selected_ssid.data(), chosen.ssid.data(), wifi_selected_ssid.size() - 1);
+                                const size_t ssid_len = std::strlen(wifi_selected_ssid.data());
+
+                                if (chosen.authmode == WIFI_AUTH_OPEN) {
+                                    // No password needed - connect straight away.
+                                    state = ui::state_t::WIFI_CONNECTING;
+                                    ui::send(make_custom_request("Connecting to", {wifi_selected_ssid.data(), ssid_len}));
+
+                                    esp_err_t conn_ret = wifi::connect({wifi_selected_ssid.data(), ssid_len}, "");
+                                    if (conn_ret == ESP_OK) {
+                                        [[maybe_unused]] auto _ = storage::set_wifi_creds({wifi_selected_ssid.data(), ssid_len}, "");
+                                        ui::send_feedback("Connected!");
+                                    } else {
+                                        ui::send_feedback("Connect failed", "Check network");
+                                    }
+                                    state = ui::state_t::ADMIN_MENU;
+                                    ui::render_menu(menu_idx);
+                                } else {
+                                    wifi_pw_len = 0;
+                                    wifi_pw_buf.fill('\0');
+                                    mt_session.reset();
+                                    state = ui::state_t::WIFI_PW_ENTRY;
+                                    ui::send(make_custom_request("Password:", ""));
+                                }
+                                break;
+                            }
+
+                            ui::render_wifi_entry(wifi_list_idx, wifi_scan_count, wifi_scan_results[wifi_list_idx]);
+                            break;
+                        }
+
+                        case ui::state_t::WIFI_PW_ENTRY: {
+                            if (recv_key >= '0' && recv_key <= '9') {
+                                if (!mt_session.on_digit(recv_key, wifi_pw_buf, wifi_pw_len)) {
+                                    break; // Buffer full, press dropped
+                                }
+                            } else if (recv_key == 'B') {
+                                if (wifi_pw_len > 0) {
+                                    wifi_pw_buf[--wifi_pw_len] = '\0';
+                                }
+                                mt_session.on_backspace();
+                            } else if (recv_key == 'C') {
+                                mt_session.toggle_caps(wifi_pw_buf, wifi_pw_len);
+                            } else if (recv_key == '*') {
+                                state = ui::state_t::WIFI_LIST;
+                                ui::render_wifi_entry(wifi_list_idx, wifi_scan_count, wifi_scan_results[wifi_list_idx]);
+                                break;
+                            } else if (recv_key == '#') {
+                                g_admin_mode = false;
+                                state        = ui::state_t::AWAITING_PASSWORD;
+                                ui::send(password_req);
+                                break;
+                            } else if (recv_key == 'A') {
+                                if (wifi_pw_len < 8) { // WPA2 minimum
+                                    ui::send_feedback("Too short", "Min 8 chars");
+                                    break;
+                                }
+
+                                const size_t ssid_len = std::strlen(wifi_selected_ssid.data());
+                                state                 = ui::state_t::WIFI_CONNECTING;
+                                ui::send(make_custom_request("Connecting to", {wifi_selected_ssid.data(), ssid_len}));
+
+                                esp_err_t conn_ret = wifi::connect({wifi_selected_ssid.data(), ssid_len}, {wifi_pw_buf.data(), wifi_pw_len});
+                                if (conn_ret == ESP_OK) {
+                                    [[maybe_unused]] auto _ =
+                                        storage::set_wifi_creds({wifi_selected_ssid.data(), ssid_len}, {wifi_pw_buf.data(), wifi_pw_len});
+                                    ui::send_feedback("Connected!");
+                                } else {
+                                    ui::send_feedback("Connect failed", "Wrong password?");
+                                }
+
+                                wifi_pw_buf.fill('\0');
+                                wifi_pw_len = 0;
+                                state       = ui::state_t::ADMIN_MENU;
+                                ui::render_menu(menu_idx);
+                                break;
+                            }
+
+                            if (state == ui::state_t::WIFI_PW_ENTRY) {
+                                // Mask everything except the char currently being cycled (if
+                                // any), so the user can see what they're about to lock in -
+                                // same trick old T9 phones used for password fields.
+                                std::array<char, wifi::PASSWORD_MAX_LEN> display_buf{};
+                                for (size_t i = 0; i < wifi_pw_len; i++) {
+                                    const bool is_live_char = mt_session.is_pending() && (i == wifi_pw_len - 1);
+                                    display_buf[i]          = is_live_char ? wifi_pw_buf[i] : '*';
+                                }
+                                // Show only the trailing LCD_COLUMNS characters so typing past 16 chars scrolls.
+                                const size_t start = wifi_pw_len > config::LCD_COLUMNS ? (wifi_pw_len - config::LCD_COLUMNS) : 0;
+                                ui::send(make_custom_request("Password:", {display_buf.data() + start, wifi_pw_len - start}));
+                            }
+                            break;
+                        }
+
+                        case ui::state_t::WIFI_CONNECTING: {
+                            // Transient - connect() is synchronous, state has already moved
+                            // on by the time control would reach here.
+                            break;
+                        }
                     }
                 }
             }
-        }
 
-        [[noreturn]] void display_task(void* arg) {
-            constexpr const char* TAG = "Display_task";
-            ESP_LOGI(TAG, "Display_task started");
+            [[noreturn]] void display(void* arg) {
+                constexpr const char* TAG = "Display_task";
+                ESP_LOGI(TAG, "Display_task started");
 
-            // The last screen that was meant to persist (i.e. not itself a transient
-            // "return_to_prev" alert). This is what a transient alert reverts back to
-            // once its hold duration elapses - it can be a canned screen or the system
-            // task's current interactive UI state (menu, in-progress digit entry, etc.).
-            display_request_t persistent_request = password_req;
-            display_request_t request            = {};
+                // The last screen that was meant to persist (i.e. not itself a transient
+                // "return_to_prev" alert). This is what a transient alert reverts back to
+                // once its hold duration elapses - it can be a canned screen or the system
+                // task's current interactive UI state (menu, in-progress digit entry, etc.).
+                display_request_t persistent_request = password_req;
+                display_request_t request            = {};
 
-            while (true) {
-                // Block till a request is received
-                xQueueReceive(g_display_queue, &request, portMAX_DELAY);
+                // Renders a single request to the LCD, whether it's a canned screen_type or free form text.
+                auto render_display_request = [](const display_request_t& request) {
+                    if (request.use_custom_text) {
+                        sys::println({request.line0.data(), request.line0.size()}, 0);
+                        sys::println({request.line1.data(), request.line1.size()}, 1);
+                    } else {
+                        sys::println(SCREEN_MAP_LUT[std::to_underlying(request.screen_type)].first, 0);
+                        sys::println(SCREEN_MAP_LUT[std::to_underlying(request.screen_type)].second, 1);
+                    }
+                };
 
-                render_display_request(request);
+                while (true) {
+                    // Block till a request is received
+                    xQueueReceive(g_display_queue, &request, portMAX_DELAY);
 
-                if (request.return_to_prev) {
-                    // Hold the current screen for the requested amount of time, then
-                    // revert to whatever was persistently displayed before it.
-                    vTaskDelay(pdMS_TO_TICKS(request.duration_ms));
-                    render_display_request(persistent_request);
+                    // Immediately render the requested screen
+                    render_display_request(request);
+
+                    if (request.return_to_prev) {
+                        // Hold the current screen for the requested amount of time, then
+                        // revert to whatever was persistently displayed before it.
+                        vTaskDelay(pdMS_TO_TICKS(request.duration_ms));
+                        render_display_request(persistent_request);
+                    } else {
+                        // Since we do not have to return to the previous screen, this request
+                        // now becomes the screen we revert back to upon a new display request.
+                        persistent_request = request;
+                    }
+
+                    // If return_to_prev is false, there is no reason to block here.
+                    // Instead the screen will be held till the next display request.
+                }
+            }
+
+            [[noreturn]] void switches(void* arg) {
+                constexpr const char* TAG = "Switch_task";
+                ESP_LOGI(TAG, "Switch_task started");
+
+                // Initialize the reed and tamper switches.
+                nc::switch_t<nc::type_t::REED, false> reed;
+                TRY_WITH_FUNC_VOID(reed.init({.pin = config::REED_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
+
+                nc::switch_t<nc::type_t::TAMPER, false> tamper;
+                TRY_WITH_FUNC_VOID(tamper.init({.pin = config::TAMPER_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
+
+                while (true) {
+                    uint32_t notification{};
+
+                    bool reed_switch_broken   = false;
+                    bool tamper_switch_broken = false;
+
+                    // Block till a switch break
+                    xTaskNotifyWait(0, UINT32_MAX, &notification, portMAX_DELAY);
+
+                    if (notification & std::to_underlying(nc::type_t::REED)) {
+                        ESP_LOGI(TAG, "Reed switch broken");
+                        reed_switch_broken = true;
+                    }
+
+                    if (notification & std::to_underlying(nc::type_t::TAMPER)) {
+                        ESP_LOGI(TAG, "Tamper switch broken");
+                        tamper_switch_broken = true;
+                    }
+
+                    if (reed_switch_broken) {
+                        const auto& reed_broken_request = g_admin_mode ? reed_switch_broken_admin : reed_switch_broken_no_admin;
+                        xQueueSend(g_display_queue, &reed_broken_request, portMAX_DELAY);
+                        sys::alert_on_reed_switch_break(g_admin_mode);
+                    }
+
+                    if (tamper_switch_broken) {
+                        const auto& tamper_broken_request = g_admin_mode ? tamper_switch_broken_admin : tamper_switch_broken_no_admin;
+                        xQueueSend(g_display_queue, &tamper_broken_request, portMAX_DELAY);
+                        sys::alert_on_tamper_switch_break(g_admin_mode);
+                    }
+                }
+            }
+
+            [[noreturn]] void wifi(void* arg) {
+                constexpr const char* TAG = "WiFi_task";
+                ESP_LOGI(TAG, "WiFi_task started");
+
+                // If we have credentials saved from a previous boot, attempt to connect to it.
+                if (auto creds = storage::get_wifi_creds(); creds.has_value()) {
+                    const size_t ssid_len = std::strlen(creds->ssid.data());
+                    const size_t pw_len   = std::strlen(creds->password.data());
+
+                    ESP_LOGI(TAG, "Found saved WiFi credentials for \"%.*s\". Attempting to connect", ssid_len, creds->ssid.data());
+
+                    if (auto ret = wifi::connect({creds->ssid.data(), ssid_len}, {creds->password.data(), pw_len}); ret != ESP_OK) {
+                        ESP_LOGW(TAG, "Failed to connect to saved WiFi AP on boot: %s", esp_err_to_name(ret));
+                    }
                 } else {
-                    // This request now becomes the new baseline to revert back to.
-                    persistent_request = request;
+                    ESP_LOGW(TAG, "No saved WiFi credentials. Use the admin menu's \"WiFi setup\" to configure one");
                 }
 
-                // If return_to_prev is false, there is no reason to block here.
-                // Instead the screen will be held till the next display request.
-            }
-        }
+                // wifi::init() and the initial connect attempt (if credentials were saved)
+                // already happened in init_all() before any task was created. This task just
+                // periodically checks the connection is still alive - actual reconnect-on-drop
+                // is handled inside wifi.cpp's own event handler; this is a backstop in case
+                // that gets stuck.
+                uint32_t consc_err_counter = 0;
 
-        [[noreturn]] void switch_task(void* arg) {
-            constexpr const char* TAG = "Switch_task";
-            ESP_LOGI(TAG, "Switch_task started");
-
-            // Initialize the reed and tamper switches.
-            nc::switch_t<nc::type_t::REED, false> reed;
-            TRY_WITH_FUNC_VOID(reed.init({.pin = config::REED_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
-
-            nc::switch_t<nc::type_t::TAMPER, false> tamper;
-            TRY_WITH_FUNC_VOID(tamper.init({.pin = config::TAMPER_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
-
-            while (true) {
-                uint32_t notification{};
-
-                bool reed_switch_broken   = false;
-                bool tamper_switch_broken = false;
-
-                // Block till a switch break
-                xTaskNotifyWait(0, UINT32_MAX, &notification, portMAX_DELAY);
-
-                if (notification & std::to_underlying(nc::type_t::REED)) {
-                    ESP_LOGI(TAG, "Reed switch broken");
-                    reed_switch_broken = true;
-                }
-
-                if (notification & std::to_underlying(nc::type_t::TAMPER)) {
-                    ESP_LOGI(TAG, "Tamper switch broken");
-                    tamper_switch_broken = true;
-                }
-
-                if (reed_switch_broken) {
-                    const auto& reed_broken_request = g_admin_mode ? reed_switch_broken_admin : reed_switch_broken_no_admin;
-                    xQueueSend(g_display_queue, &reed_broken_request, portMAX_DELAY);
-                    sys::alert_on_reed_switch_break(g_admin_mode);
-                }
-
-                if (tamper_switch_broken) {
-                    const auto& tamper_broken_request = g_admin_mode ? tamper_switch_broken_admin : tamper_switch_broken_no_admin;
-                    xQueueSend(g_display_queue, &tamper_broken_request, portMAX_DELAY);
-                    sys::alert_on_tamper_switch_break(g_admin_mode);
-                }
-            }
-        }
-
-        [[noreturn]] void wifi_task(void* arg) {
-            constexpr const char* TAG = "WiFi_task";
-            ESP_LOGI(TAG, "WiFi_task started");
-
-            // If we have credentials saved from a previous "WiFi setup" session, try them now.
-            // Not fatal on failure - the device is still fully usable locally (keypad, LCD,
-            // switches), and the admin menu's "WiFi setup" lets this be fixed without a re-flash.
-            if (auto creds = storage::get_wifi_creds(); creds.has_value()) {
-                const size_t ssid_len = std::strlen(creds->ssid.data());
-                const size_t pw_len   = std::strlen(creds->password.data());
-
-                ESP_LOGI("Init", "Found saved WiFi credentials for \"%.*s\". Attempting to connect", static_cast<int>(ssid_len), creds->ssid.data());
-
-                if (auto ret = wifi::connect({creds->ssid.data(), ssid_len}, {creds->password.data(), pw_len}); ret != ESP_OK) {
-                    ESP_LOGW("Init", "Failed to connect to saved WiFi on boot: %s", esp_err_to_name(ret));
-                }
-            } else {
-                ESP_LOGW("Init", "No saved WiFi credentials. Use the admin menu's \"WiFi setup\" to configure one");
-            }
-
-            // wifi::init() and the initial connect attempt (if credentials were saved)
-            // already happened in init_all() before any task was created. This task just
-            // periodically checks the connection is still alive - actual reconnect-on-drop
-            // is handled inside wifi.cpp's own event handler; this is a backstop in case
-            // that gets stuck.
-            uint32_t consc_err_counter = 0;
-
-            while (true) {
-                if (!wifi::is_connected()) {
-                    ESP_LOGW(TAG, "WiFi not connected");
-                    consc_err_counter++;
-                    if (consc_err_counter >= config::MAX_WIFI_CONSC_STATUS_ERRORS) {
-                        ESP_LOGE(TAG, "WiFi has been down too long. Rebooting to force a clean reconnect attempt");
-                        utils::reboot();
+                while (true) {
+                    if (!wifi::is_connected()) {
+                        ESP_LOGW(TAG, "WiFi not connected");
+                        consc_err_counter++;
+                        if (consc_err_counter >= config::MAX_WIFI_CONSC_STATUS_ERRORS) {
+                            ESP_LOGE(TAG, "WiFi has been down too long. Rebooting to force a clean reconnection attempt");
+                            utils::reboot();
+                        }
+                    } else {
+                        consc_err_counter = 0;
                     }
-                } else {
-                    consc_err_counter = 0;
+                    vTaskDelay(pdMS_TO_TICKS(config::WIFI_TASK_PERIOD_MS));
                 }
-                vTaskDelay(pdMS_TO_TICKS(config::WIFI_TASK_PERIOD_MS));
             }
-        }
+
+        } // namespace tasks
 
     } // namespace
 
@@ -925,25 +830,25 @@ namespace tasks {
         constexpr const char* TAG = "Tasks";
 
         // Create the tasks
-        BaseType_t ret = xTaskCreate(system_task, "system_task", config::SYSTEM_TASK_STACK, nullptr, config::SYSTEM_TASK_PRIORITY, nullptr);
+        BaseType_t ret = xTaskCreate(tasks::system, "system_task", config::SYSTEM_TASK_STACK, nullptr, config::SYSTEM_TASK_PRIORITY, nullptr);
         if (ret != pdPASS) {
             ESP_LOGE(TAG, "Failed to create the system task");
             utils::fatal();
         }
 
-        ret = xTaskCreate(display_task, "display_task", config::DISPlAY_TASK_STACK, nullptr, config::DISPlAY_TASK_PRIORITY, nullptr);
+        ret = xTaskCreate(tasks::display, "display_task", config::DISPlAY_TASK_STACK, nullptr, config::DISPlAY_TASK_PRIORITY, nullptr);
         if (ret != pdPASS) {
             ESP_LOGE(TAG, "Failed to create the display task");
             utils::fatal();
         }
 
-        ret = xTaskCreate(switch_task, "switch_task", config::SWITCH_TASK_STACK, nullptr, config::SWITCH_TASK_PRIORITY, nullptr);
+        ret = xTaskCreate(tasks::switches, "switch_task", config::SWITCH_TASK_STACK, nullptr, config::SWITCH_TASK_PRIORITY, nullptr);
         if (ret != pdPASS) {
             ESP_LOGE(TAG, "Failed to create the switch task");
             utils::fatal();
         }
 
-        ret = xTaskCreate(wifi_task, "wifi_task", config::WIFI_TASK_STACK, nullptr, config::WIFI_TASK_PRIORITY, nullptr);
+        ret = xTaskCreate(tasks::wifi, "wifi_task", config::WIFI_TASK_STACK, nullptr, config::WIFI_TASK_PRIORITY, nullptr);
         if (ret != pdPASS) {
             ESP_LOGE(TAG, "Failed to create the wifi task");
             utils::fatal();
