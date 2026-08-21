@@ -332,7 +332,6 @@ namespace tasks {
                 last_activity_tick = xTaskGetTickCount();
 
                 switch (state) {
-
                     case ui_state_t::AWAITING_PASSWORD: {
                         if (recv_key >= '0' && recv_key <= '9') {
                             if (input_len < storage::PASSWORD_LEN) {
@@ -780,7 +779,7 @@ namespace tasks {
                             // same trick old T9 phones used for password fields.
                             std::array<char, wifi::PASSWORD_MAX_LEN> display_buf{};
                             for (size_t i = 0; i < wifi_pw_len; i++) {
-                                const bool is_live_char = mt_session.pending && (i == wifi_pw_len - 1);
+                                const bool is_live_char = mt_session.is_pending() && (i == wifi_pw_len - 1);
                                 display_buf[i]          = is_live_char ? wifi_pw_buf[i] : '*';
                             }
                             // Show only the trailing LCD_COLUMNS characters so typing past 16 chars scrolls.
