@@ -19,9 +19,8 @@ namespace wifi {
     using pswd_t = std::array<char, PASSWORD_MAX_LEN + 1>;
 
     struct ap_info_t {
-        ssid_t ssid{};
-        int8_t rssi{};
-
+        ssid_t           ssid{};
+        int8_t           rssi{};
         wifi_auth_mode_t authmode{};
     };
 

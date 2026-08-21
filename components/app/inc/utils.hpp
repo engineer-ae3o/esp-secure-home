@@ -69,6 +69,13 @@ namespace utils {
         return final_string;
     }
 
+    template<typename T, size_t N>
+    consteval std::array<T, N> make_filled_array(T val) {
+        std::array<T, N> arr{};
+        arr.fill(val);
+        return arr;
+    }
+
     [[noreturn]] inline void fatal(const std::source_location& location = std::source_location::current()) {
         ESP_LOGE("FATAL", "Unrecoverable error from %s (%s:%u)", location.function_name(), location.file_name(), location.line());
         esp_system_abort("Fatal error. Cannot recover. Halting system.");

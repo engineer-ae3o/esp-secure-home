@@ -5,6 +5,7 @@
 #include "freertos/projdefs.h"
 
 #include "config.hpp"
+#include "utils.hpp"
 
 #include <array>
 #include <cstdint>
@@ -54,9 +55,8 @@ namespace {
     // Builds a display line of exactly LCD_COLUMNS characters.
     // It copies in as much of text as fits and space pads the rest.
     constexpr std::array<char, config::LCD_COLUMNS> make_line(std::string_view text) {
-        std::array<char, config::LCD_COLUMNS> line{};
-        line.fill(' ');
-        const size_t len = std::min<size_t>(text.size(), config::LCD_COLUMNS);
+        std::array<char, config::LCD_COLUMNS> line = utils::make_filled_array<char, config::LCD_COLUMNS>(' ');
+        const size_t                          len  = std::min<size_t>(text.size(), config::LCD_COLUMNS);
         for (size_t i = 0; i < len; i++) {
             line[i] = text[i];
         }

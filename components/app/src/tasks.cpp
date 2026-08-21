@@ -145,6 +145,135 @@ namespace tasks {
 
         namespace tasks {
 
+            [[noreturn]] void display(void* arg) {
+                constexpr const char* TAG = "Display_task";
+                ESP_LOGI(TAG, "Display_task started");
+
+                // The last screen that was meant to persist (i.e. not itself a transient
+                // "return_to_prev" alert). This is what a transient alert reverts back to
+                // once its hold duration elapses - it can be a canned screen or the system
+                // task's current interactive UI state (menu, in-progress digit entry, etc.).
+                display_request_t persistent_request = password_req;
+                display_request_t request            = {};
+
+                // Renders a single request to the LCD, whether it's a canned screen_type or free form text.
+                auto render_display_request = [](const display_request_t& request) {
+                    if (request.use_custom_text) {
+                        sys::println({request.line0.data(), request.line0.size()}, 0);
+                        sys::println({request.line1.data(), request.line1.size()}, 1);
+                    } else {
+                        sys::println(SCREEN_MAP_LUT[std::to_underlying(request.screen_type)].first, 0);
+                        sys::println(SCREEN_MAP_LUT[std::to_underlying(request.screen_type)].second, 1);
+                    }
+                };
+
+                while (true) {
+                    // Block till a request is received
+                    xQueueReceive(g_display_queue, &request, portMAX_DELAY);
+
+                    // Immediately render the requested screen
+                    render_display_request(request);
+
+                    if (request.return_to_prev) {
+                        // Hold the current screen for the requested amount of time, then
+                        // revert to whatever was persistently displayed before it.
+                        vTaskDelay(pdMS_TO_TICKS(request.duration_ms));
+                        render_display_request(persistent_request);
+                    } else {
+                        // Since we do not have to return to the previous screen, this request
+                        // now becomes the screen we revert back to upon a new display request.
+                        persistent_request = request;
+                    }
+
+                    // If return_to_prev is false, there is no reason to block here.
+                    // Instead the screen will be held till the next display request.
+                }
+            }
+
+            [[noreturn]] void switches(void* arg) {
+                constexpr const char* TAG = "Switch_task";
+                ESP_LOGI(TAG, "Switch_task started");
+
+                // Initialize the reed and tamper switches.
+                nc::switch_t<nc::type_t::REED, false> reed;
+                TRY_WITH_FUNC_VOID(reed.init({.pin = config::REED_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
+
+                nc::switch_t<nc::type_t::TAMPER, false> tamper;
+                TRY_WITH_FUNC_VOID(tamper.init({.pin = config::TAMPER_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
+
+                while (true) {
+                    uint32_t notification{};
+
+                    bool reed_switch_broken   = false;
+                    bool tamper_switch_broken = false;
+
+                    // Block till a switch break
+                    xTaskNotifyWait(0, UINT32_MAX, &notification, portMAX_DELAY);
+
+                    if (notification & std::to_underlying(nc::type_t::REED)) {
+                        ESP_LOGI(TAG, "Reed switch broken");
+                        reed_switch_broken = true;
+                    }
+
+                    if (notification & std::to_underlying(nc::type_t::TAMPER)) {
+                        ESP_LOGI(TAG, "Tamper switch broken");
+                        tamper_switch_broken = true;
+                    }
+
+                    if (reed_switch_broken) {
+                        const auto& reed_broken_request = g_admin_mode ? reed_switch_broken_admin : reed_switch_broken_no_admin;
+                        xQueueSend(g_display_queue, &reed_broken_request, portMAX_DELAY);
+                        sys::alert_on_reed_switch_break(g_admin_mode);
+                    }
+
+                    if (tamper_switch_broken) {
+                        const auto& tamper_broken_request = g_admin_mode ? tamper_switch_broken_admin : tamper_switch_broken_no_admin;
+                        xQueueSend(g_display_queue, &tamper_broken_request, portMAX_DELAY);
+                        sys::alert_on_tamper_switch_break(g_admin_mode);
+                    }
+                }
+            }
+
+            [[noreturn]] void wifi(void* arg) {
+                constexpr const char* TAG = "WiFi_task";
+                ESP_LOGI(TAG, "WiFi_task started");
+
+                // If we have credentials saved from a previous boot, attempt to connect to it.
+                if (auto creds = storage::get_wifi_creds(); creds.has_value()) {
+                    const size_t ssid_len = std::strlen(creds->ssid.data());
+                    const size_t pw_len   = std::strlen(creds->password.data());
+
+                    ESP_LOGI(TAG, "Found saved WiFi credentials for \"%.*s\". Attempting to connect", ssid_len, creds->ssid.data());
+
+                    if (auto ret = wifi::connect({creds->ssid.data(), ssid_len}, {creds->password.data(), pw_len}); ret != ESP_OK) {
+                        ESP_LOGW(TAG, "Failed to connect to saved WiFi AP on boot: %s", esp_err_to_name(ret));
+                    }
+                } else {
+                    ESP_LOGW(TAG, "No saved WiFi credentials. Use the admin menu's \"WiFi setup\" to configure one");
+                }
+
+                // wifi::init() and the initial connect attempt (if credentials were saved)
+                // already happened in init_all() before any task was created. This task just
+                // periodically checks the connection is still alive - actual reconnect-on-drop
+                // is handled inside wifi.cpp's own event handler; this is a backstop in case
+                // that gets stuck.
+                uint32_t consc_err_counter = 0;
+
+                while (true) {
+                    if (!wifi::is_connected()) {
+                        ESP_LOGW(TAG, "WiFi not connected");
+                        consc_err_counter++;
+                        if (consc_err_counter >= config::MAX_WIFI_CONSC_STATUS_ERRORS) {
+                            ESP_LOGE(TAG, "WiFi has been down too long. Rebooting to force a clean reconnection attempt");
+                            utils::reboot();
+                        }
+                    } else {
+                        consc_err_counter = 0;
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(config::WIFI_TASK_PERIOD_MS));
+                }
+            }
+
             [[noreturn]] void system(void* arg) {
                 constexpr const char* TAG = "System_task";
                 ESP_LOGI(TAG, "System_task started");
@@ -157,40 +286,43 @@ namespace tasks {
                 auto* keypad_event_queue = keypad.get_event_queue().value();
                 char  recv_key{};
 
-                ui::state_t state = ui::state_t::AWAITING_PASSWORD;
-
                 // Digit entry buffer, sized for the largest thing ever typed into it (a chat ID).
                 std::array<char, telegram::CHAT_ID_LEN> input_buf{};
                 size_t                                  input_len = 0;
 
                 // Holds the first entry of a new password while the user is asked to confirm it.
-                std::array<char, storage::PASSWORD_LEN> pw_pending{};
+                storage::pswd_t pw_pending{};
 
                 size_t   menu_idx        = 0; // Selected item in the admin menu
                 size_t   list_idx        = 0; // Selected item while viewing/removing recipients
                 uint32_t failed_attempts = 0; // Consecutive failed password attempts (brute force protection)
 
-                TickType_t lockout_until_tick = 0;
+                TickType_t lockout_until_tick = 0; // How long till a lockout gets expired
                 TickType_t last_activity_tick = xTaskGetTickCount();
 
                 // WiFi setup state
                 std::array<wifi::ap_info_t, wifi::MAX_SCAN_RESULTS> wifi_scan_results{};
-                size_t                                              wifi_scan_count = 0;
-                size_t                                              wifi_list_idx   = 0;
 
-                std::array<char, wifi::SSID_LEN + 1>         wifi_selected_ssid{};
-                std::array<char, wifi::PASSWORD_MAX_LEN + 1> wifi_pw_buf{};
-                size_t                                       wifi_pw_len = 0;
+                size_t wifi_scan_count = 0;
+                size_t wifi_list_idx   = 0;
+
+                wifi::ssid_t wifi_selected_ssid{};
+                wifi::pswd_t wifi_pw_buf{};
+                size_t       wifi_pw_len = 0;
 
                 multitap::session_t mt_session{};
+
+                // The default state after a reboot is the screen which requests for the password to enter admin mode
+                ui::state_t state = ui::state_t::AWAITING_PASSWORD;
 
                 // Push the password request screen to the display queue
                 ui::send(password_req);
 
                 while (true) {
+                    // Check for user input on the keypad
                     auto ret = xQueueReceive(keypad_event_queue, &recv_key, 0);
 
-                    // Handle lockout expiry / admin idle timeout / multi-tap timeout even when no key was pressed
+                    // Handle lockout expiry / admin idle timeout / multi tap timeout even when no key was pressed
                     if (ret != pdPASS) {
                         const auto now = xTaskGetTickCount();
 
@@ -204,6 +336,7 @@ namespace tasks {
                             state           = ui::state_t::AWAITING_PASSWORD;
                             input_len       = 0;
                             ui::render_password_prompt({});
+
                         } else if (state != ui::state_t::AWAITING_PASSWORD && state != ui::state_t::LOCKED_OUT &&
                                    (now - last_activity_tick) >= pdMS_TO_TICKS(config::ADMIN_IDLE_TIMEOUT_MS)) {
                             ESP_LOGI(TAG, "Admin session idle for too long. Logging out");
@@ -255,7 +388,7 @@ namespace tasks {
                                 if (failed_attempts >= config::MAX_PASSWORD_ATTEMPTS) {
                                     state              = ui::state_t::LOCKED_OUT;
                                     lockout_until_tick = xTaskGetTickCount() + pdMS_TO_TICKS(config::LOCKOUT_DURATION_MS);
-                                    ESP_LOGW(TAG, "Too many failed attempts. Locking keypad for %lu ms", config::LOCKOUT_DURATION_MS);
+                                    ESP_LOGW(TAG, "Too many failed attempts. Locking the system for %lums", config::LOCKOUT_DURATION_MS);
                                     ui::send(make_custom_request("Too many tries", "Keypad locked"));
                                 } else {
                                     ui::send_feedback("Wrong password");
@@ -565,7 +698,7 @@ namespace tasks {
                         }
 
                         case ui::state_t::WIFI_SCANNING: {
-                            // Transient - scan() is synchronous and already moved state on
+                            // Transient. scan() is synchronous and already moved state on
                             // by the time control would reach here.
                             break;
                         }
@@ -682,140 +815,11 @@ namespace tasks {
                         }
 
                         case ui::state_t::WIFI_CONNECTING: {
-                            // Transient - connect() is synchronous, state has already moved
+                            // Transient. connect() is synchronous, state has already moved
                             // on by the time control would reach here.
                             break;
                         }
                     }
-                }
-            }
-
-            [[noreturn]] void display(void* arg) {
-                constexpr const char* TAG = "Display_task";
-                ESP_LOGI(TAG, "Display_task started");
-
-                // The last screen that was meant to persist (i.e. not itself a transient
-                // "return_to_prev" alert). This is what a transient alert reverts back to
-                // once its hold duration elapses - it can be a canned screen or the system
-                // task's current interactive UI state (menu, in-progress digit entry, etc.).
-                display_request_t persistent_request = password_req;
-                display_request_t request            = {};
-
-                // Renders a single request to the LCD, whether it's a canned screen_type or free form text.
-                auto render_display_request = [](const display_request_t& request) {
-                    if (request.use_custom_text) {
-                        sys::println({request.line0.data(), request.line0.size()}, 0);
-                        sys::println({request.line1.data(), request.line1.size()}, 1);
-                    } else {
-                        sys::println(SCREEN_MAP_LUT[std::to_underlying(request.screen_type)].first, 0);
-                        sys::println(SCREEN_MAP_LUT[std::to_underlying(request.screen_type)].second, 1);
-                    }
-                };
-
-                while (true) {
-                    // Block till a request is received
-                    xQueueReceive(g_display_queue, &request, portMAX_DELAY);
-
-                    // Immediately render the requested screen
-                    render_display_request(request);
-
-                    if (request.return_to_prev) {
-                        // Hold the current screen for the requested amount of time, then
-                        // revert to whatever was persistently displayed before it.
-                        vTaskDelay(pdMS_TO_TICKS(request.duration_ms));
-                        render_display_request(persistent_request);
-                    } else {
-                        // Since we do not have to return to the previous screen, this request
-                        // now becomes the screen we revert back to upon a new display request.
-                        persistent_request = request;
-                    }
-
-                    // If return_to_prev is false, there is no reason to block here.
-                    // Instead the screen will be held till the next display request.
-                }
-            }
-
-            [[noreturn]] void switches(void* arg) {
-                constexpr const char* TAG = "Switch_task";
-                ESP_LOGI(TAG, "Switch_task started");
-
-                // Initialize the reed and tamper switches.
-                nc::switch_t<nc::type_t::REED, false> reed;
-                TRY_WITH_FUNC_VOID(reed.init({.pin = config::REED_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
-
-                nc::switch_t<nc::type_t::TAMPER, false> tamper;
-                TRY_WITH_FUNC_VOID(tamper.init({.pin = config::TAMPER_SWITCH_PIN, .recv_task_handle = xTaskGetCurrentTaskHandle()}), utils::fatal());
-
-                while (true) {
-                    uint32_t notification{};
-
-                    bool reed_switch_broken   = false;
-                    bool tamper_switch_broken = false;
-
-                    // Block till a switch break
-                    xTaskNotifyWait(0, UINT32_MAX, &notification, portMAX_DELAY);
-
-                    if (notification & std::to_underlying(nc::type_t::REED)) {
-                        ESP_LOGI(TAG, "Reed switch broken");
-                        reed_switch_broken = true;
-                    }
-
-                    if (notification & std::to_underlying(nc::type_t::TAMPER)) {
-                        ESP_LOGI(TAG, "Tamper switch broken");
-                        tamper_switch_broken = true;
-                    }
-
-                    if (reed_switch_broken) {
-                        const auto& reed_broken_request = g_admin_mode ? reed_switch_broken_admin : reed_switch_broken_no_admin;
-                        xQueueSend(g_display_queue, &reed_broken_request, portMAX_DELAY);
-                        sys::alert_on_reed_switch_break(g_admin_mode);
-                    }
-
-                    if (tamper_switch_broken) {
-                        const auto& tamper_broken_request = g_admin_mode ? tamper_switch_broken_admin : tamper_switch_broken_no_admin;
-                        xQueueSend(g_display_queue, &tamper_broken_request, portMAX_DELAY);
-                        sys::alert_on_tamper_switch_break(g_admin_mode);
-                    }
-                }
-            }
-
-            [[noreturn]] void wifi(void* arg) {
-                constexpr const char* TAG = "WiFi_task";
-                ESP_LOGI(TAG, "WiFi_task started");
-
-                // If we have credentials saved from a previous boot, attempt to connect to it.
-                if (auto creds = storage::get_wifi_creds(); creds.has_value()) {
-                    const size_t ssid_len = std::strlen(creds->ssid.data());
-                    const size_t pw_len   = std::strlen(creds->password.data());
-
-                    ESP_LOGI(TAG, "Found saved WiFi credentials for \"%.*s\". Attempting to connect", ssid_len, creds->ssid.data());
-
-                    if (auto ret = wifi::connect({creds->ssid.data(), ssid_len}, {creds->password.data(), pw_len}); ret != ESP_OK) {
-                        ESP_LOGW(TAG, "Failed to connect to saved WiFi AP on boot: %s", esp_err_to_name(ret));
-                    }
-                } else {
-                    ESP_LOGW(TAG, "No saved WiFi credentials. Use the admin menu's \"WiFi setup\" to configure one");
-                }
-
-                // wifi::init() and the initial connect attempt (if credentials were saved)
-                // already happened in init_all() before any task was created. This task just
-                // periodically checks the connection is still alive - actual reconnect-on-drop
-                // is handled inside wifi.cpp's own event handler; this is a backstop in case
-                // that gets stuck.
-                uint32_t consc_err_counter = 0;
-
-                while (true) {
-                    if (!wifi::is_connected()) {
-                        ESP_LOGW(TAG, "WiFi not connected");
-                        consc_err_counter++;
-                        if (consc_err_counter >= config::MAX_WIFI_CONSC_STATUS_ERRORS) {
-                            ESP_LOGE(TAG, "WiFi has been down too long. Rebooting to force a clean reconnection attempt");
-                            utils::reboot();
-                        }
-                    } else {
-                        consc_err_counter = 0;
-                    }
-                    vTaskDelay(pdMS_TO_TICKS(config::WIFI_TASK_PERIOD_MS));
                 }
             }
 
